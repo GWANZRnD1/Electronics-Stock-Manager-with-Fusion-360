@@ -1,30 +1,45 @@
 # Electronics Stock Manager with Fusion 360
 
-An electronics-component inventory manager. Pull a PCB BOM from Autodesk
-**Fusion 360 (Electronics)**, check live stock, compute whether you have enough
-parts to build *N* boards, and get **DigiKey / Mouser / LCSC** batch purchase
-links for any shortages. Scan a component's barcode with your phone camera to
-identify and receive it into a location; "build" a board to automatically
-decrement stock and record history.
+An electronics-component inventory manager for people who design PCBs in Autodesk
+**Fusion 360 (Electronics)**. Track parts and stock, search by any attribute,
+sync parts from your Fusion library, scan reels to receive stock, plan board
+builds against live stock, get **DigiKey / Mouser / LCSC** purchase links for
+shortages, and "build" a board to auto-decrement stock with history. Installable
+as a mobile PWA.
+
+## Features
+
+- **Inventory** — searchable table (category, name, manufacturer, MPN, size,
+  location, qty) with per-attribute advanced search; bottom-right **+** speed-dial
+  to add a part or location; **add-part auto-fills** from DigiKey/Mouser by MPN.
+- **Scan & receive** — phone camera reads DigiKey/Mouser DataMatrix or LCSC QR
+  (`@zxing`), prefills MPN/qty, pick a location, receive into stock.
+- **Boards & shortage** — paste/import a BOM, enter how many to build, see
+  per-part shortage (~6 ms on 50k rows), and one-click DigiKey batch list + per-part
+  DigiKey/Mouser/LCSC links.
+- **Build & consume** — build N boards: checks stock, decrements it (with audit
+  trail), records build history; blocks if short.
+- **Part lookup** — live price/stock from DigiKey + Mouser by MPN (LCSC = link only).
+- **Fusion sync** — a ULP exports your Electronics **library** and a Fusion script
+  pushes it into the catalog (`fusion/`).
+- **PWA** — installable, mobile-first, offline shell; shared-PIN gate.
 
 ## Stack
 
-- **Web app (`web/`)** — **Next.js (App Router, TypeScript)**: PWA frontend +
-  API routes (integrated backend), **Neon Postgres + Drizzle ORM**
-- **Fusion (`fusion/`)** — custom **ULP** (schematic BOM extraction) + **Python
-  add-in** (HTTPS sync to the backend) — *planned*
-- **Deploy** — Vercel (web app) + Neon (database)
-- **Docs (`docs/`)** — architecture and distributor API-key setup guide
+- **Web app (`web/`)** — Next.js (App Router, TypeScript): PWA frontend + API
+  routes (integrated backend), **Supabase Postgres + Drizzle ORM**
+- **Fusion (`fusion/`)** — custom **ULP** (library export) + **Python script**
+  (HTTPS sync to the backend)
+- **Deploy** — Vercel (web app) + Supabase (database); keep-alive via Vercel Cron
+- **Docs (`docs/`)** — architecture, deployment, distributor API-key setup
 
 ## Key design constraint (must read)
 
 Fusion 360's public Python API **does not expose the Electronics (ECAD)
-workspace** — you cannot read the schematic/board/components/MPN directly from
-Python. BOM extraction is therefore done with a **custom ULP script** (run in
-the schematic, emits JSON/CSV), and the **Python add-in** only provides the UI
-and POSTs that file to the backend over HTTPS. The add-in ⇄ web app link is
-plain HTTP, so the backend language (TypeScript) is irrelevant to it. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+workspace**, so part/library data is exported via a **ULP** and POSTed to the
+backend by a thin Python script. The script ⇄ web app link is plain HTTP, so the
+backend language (TypeScript) is irrelevant to it. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start (web app)
 
@@ -34,32 +49,31 @@ npm install
 npm run db:migrate   # first time only — creates the tables (needs DATABASE_URL)
 npm run dev          # http://localhost:3000  (enter the ACCESS_PIN)
 npm run test         # vitest (domain-logic tests)
+npm run db:reset     # optional: wipe seed/test data for a clean start
 ```
 
-Full run/deploy instructions: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Full run/deploy instructions: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Fusion sync:
+[fusion/README.md](fusion/README.md).
 
 ## Environment variables
 
-Copy `web/.env.example` to `web/.env.local` and fill it in (server-only secrets —
-never exposed to the client):
+Copy `web/.env.example` to `web/.env.local` (server-only secrets — never exposed
+to the client):
 
 - `DATABASE_URL` — Supabase Postgres **Transaction pooler** URI (port 6543)
 - `ACCESS_PIN` — shared PIN that gates the app (unset ⇒ gate disabled)
-- distributor keys — optional; empty ⇒ adapters run in sandbox/mock mode
+- `CRON_SECRET` — secures the Vercel keep-alive cron
+- `DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET` / `DIGIKEY_USE_SANDBOX`, `MOUSER_API_KEY`
+  — optional; empty ⇒ sandbox/mock. Set `DIGIKEY_USE_SANDBOX=false` for live stock.
+- `FUSION_API_TOKEN` — shared secret for the Fusion sync endpoints
 
-For cloud deploys, set the same values as Vercel project environment variables. See
-[docs/DISTRIBUTOR_API_SETUP.md](docs/DISTRIBUTOR_API_SETUP.md) for issuing DigiKey/Mouser keys.
+See [docs/DISTRIBUTOR_API_SETUP.md](docs/DISTRIBUTOR_API_SETUP.md) for issuing keys.
 
-## Roadmap
+## Status
 
-- **Phase 0** — Foundation: scaffold, Next.js web app, core domain logic
-  (barcode parser, shortage calc, buy links) + tests
-- **Phase 1 (MVP)** — BOM ingest, shortage calc, price/stock lookup, batch buy
-  links, Fusion ULP + add-in, PWA
-- **Phase 2** — Inventory management + camera barcode scanning (receive/adjust)
-- **Phase 3** — Build/assembly workflow (stock decrement + history)
-- **Phase 4** — Auth (e.g. GitHub OAuth), PWA polish, LCSC enrichment,
-  Vercel/Neon deploy
+Built & verified: inventory + advanced search, scan→receive, boards→shortage→buy
+links, build/assembly, part lookup, Fusion library sync, installable PWA, LCSC
+link-only. Auth = shared PIN by design. Remaining: deploy to Vercel/Supabase.
 
 ## License
 
