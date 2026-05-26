@@ -1,5 +1,6 @@
 /** Unified part lookup across distributors, with a short in-memory TTL cache. */
 import { digikeySearch } from "./digikey";
+import { lcscSearch } from "./lcsc";
 import { mouserSearch } from "./mouser";
 import type { DistributorOffer, LookupResult } from "./types";
 
@@ -17,6 +18,7 @@ export async function lookupPart(mpn: string): Promise<LookupResult> {
   for (const s of settled) {
     if (s.status === "fulfilled" && s.value) offers.push(s.value);
   }
+  offers.push(lcscSearch(mpn)); // link-only LCSC offer (no public API), never fails
 
   const result: LookupResult = { mpn, offers };
   cache.set(key, { at: Date.now(), result });

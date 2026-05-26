@@ -22,6 +22,7 @@ interface Offer {
   productUrl: string;
   datasheetUrl: string | null;
   mock: boolean;
+  note?: string;
 }
 
 interface Result {
@@ -91,9 +92,9 @@ export default function LookupPage() {
               >
                 <div className="flex items-center justify-between">
                   <span className="font-medium capitalize">{o.distributor}</span>
-                  {o.mock && (
+                  {(o.note || o.mock) && (
                     <span className="rounded bg-amber-500/15 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-400">
-                      mock — no API key
+                      {o.note ?? "mock — no API key"}
                     </span>
                   )}
                 </div>
