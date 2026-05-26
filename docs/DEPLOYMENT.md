@@ -46,6 +46,7 @@ The Next.js app lives in `web/` (a subdirectory), so the **Root Directory** sett
    (and Preview if you want preview deploys):
    - `DATABASE_URL` = Supabase **Transaction pooler (6543)** URI
    - `ACCESS_PIN` = your PIN ⚠️ **required** — if unset, the gate is disabled (app is open!)
+   - `CRON_SECRET` = any long random string — secures the keep-alive cron endpoint
    - later: `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`, `DIGIKEY_USE_SANDBOX`,
      `MOUSER_API_KEY`, `FUSION_API_TOKEN`
 4. **Deploy.** Every push to `main` auto-deploys. HTTPS is automatic (needed later for the
@@ -63,6 +64,8 @@ Notes:
 
 - **Rotate the Supabase DB password** if it was ever pasted/exposed, then update `.env.local`
   and the Vercel `DATABASE_URL`.
-- **Keep-alive**: add a weekly cron (e.g. GitHub Actions) that hits the DB so the Supabase
-  free project never hits its 7-day idle pause.
-- **Backups**: Supabase free has no automated backups — schedule a periodic `pg_dump`.
+- **Keep-alive**: configured via **Vercel Cron** (`web/vercel.json` → daily hit of
+  `/api/cron/keepalive`, which runs `select 1`) so the Supabase free project never reaches
+  its 7-day idle pause. Just set the `CRON_SECRET` env var. Activates once deployed.
+- **Backups**: Supabase free has no automated backups. `.github/workflows/backup.yml` does a
+  weekly `pg_dump` artifact (needs the `DATABASE_URL` repo secret and GitHub Actions enabled).
