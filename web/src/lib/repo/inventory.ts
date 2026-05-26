@@ -2,7 +2,7 @@
  * Inventory data access. Stock is always changed by appending an inventory_txns
  * row; stock_items.quantity is kept as the running total via an upsert.
  */
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, ilike, or, sql } from "drizzle-orm";
 
 import { getDb } from "@/lib/db";
 import { inventoryTxns, locations, parts, stockItems } from "@/lib/db/schema";
@@ -14,6 +14,9 @@ export function listParts(limit = 200) {
 export async function createPart(input: {
   mpn: string;
   manufacturer?: string;
+  name?: string;
+  category?: string;
+  package?: string;
   description?: string;
 }) {
   const [row] = await getDb()
@@ -21,6 +24,9 @@ export async function createPart(input: {
     .values({
       mpn: input.mpn,
       manufacturer: input.manufacturer ?? "",
+      name: input.name ?? "",
+      category: input.category ?? "",
+      package: input.package ?? "",
       description: input.description ?? "",
     })
     .returning();
@@ -138,20 +144,68 @@ export async function upsertParts(
   return values.length;
 }
 
-/** Every part in the catalog with its total on-hand quantity (0 when never stocked). */
-export async function listCatalog(limit = 1000) {
+export interface CatalogFilters {
+  q?: string;
+  category?: string;
+  name?: string;
+  manufacturer?: string;
+  mpn?: string;
+  pkg?: string;
+  location?: string;
+  limit?: number;
+}
+
+/**
+ * Catalog with per-attribute search. Each filter is a case-insensitive substring
+ * match; `q` matches any text field. `location` matches parts that have stock in a
+ * location whose name matches. Returns total stock + a summary of stocked locations.
+ */
+export async function searchCatalog(f: CatalogFilters = {}) {
+  const conds = [];
+  if (f.q?.trim()) {
+    const q = `%${f.q.trim()}%`;
+    conds.push(
+      or(
+        ilike(parts.mpn, q),
+        ilike(parts.name, q),
+        ilike(parts.manufacturer, q),
+        ilike(parts.category, q),
+        ilike(parts.package, q),
+        ilike(parts.description, q),
+      ),
+    );
+  }
+  if (f.category?.trim()) conds.push(ilike(parts.category, `%${f.category.trim()}%`));
+  if (f.name?.trim()) conds.push(ilike(parts.name, `%${f.name.trim()}%`));
+  if (f.manufacturer?.trim()) conds.push(ilike(parts.manufacturer, `%${f.manufacturer.trim()}%`));
+  if (f.mpn?.trim()) conds.push(ilike(parts.mpn, `%${f.mpn.trim()}%`));
+  if (f.pkg?.trim()) conds.push(ilike(parts.package, `%${f.pkg.trim()}%`));
+  if (f.location?.trim()) {
+    const loc = `%${f.location.trim()}%`;
+    conds.push(
+      sql`EXISTS (SELECT 1 FROM stock_items si JOIN locations loc ON loc.id = si.location_id
+                  WHERE si.part_id = ${parts.id} AND si.quantity > 0 AND loc.name ILIKE ${loc})`,
+    );
+  }
+  const where = conds.length > 0 ? and(...conds) : undefined;
+
   const rows = await getDb()
     .select({
       id: parts.id,
-      mpn: parts.mpn,
+      category: parts.category,
+      name: parts.name,
       manufacturer: parts.manufacturer,
-      description: parts.description,
+      mpn: parts.mpn,
+      package: parts.package,
       stock: sql<number>`COALESCE(SUM(${stockItems.quantity}), 0)`,
+      locations: sql<string>`COALESCE(STRING_AGG(DISTINCT CASE WHEN ${stockItems.quantity} > 0 THEN ${locations.name} END, ', '), '')`,
     })
     .from(parts)
     .leftJoin(stockItems, eq(stockItems.partId, parts.id))
+    .leftJoin(locations, eq(locations.id, stockItems.locationId))
+    .where(where)
     .groupBy(parts.id)
-    .orderBy(parts.mpn)
-    .limit(limit);
+    .orderBy(parts.category, parts.mpn)
+    .limit(f.limit ?? 500);
   return rows.map((r) => ({ ...r, stock: Number(r.stock) }));
 }

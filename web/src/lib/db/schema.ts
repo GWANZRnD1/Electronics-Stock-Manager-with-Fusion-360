@@ -20,11 +20,18 @@ export const parts = pgTable(
     id: serial("id").primaryKey(),
     mpn: text("mpn").notNull(),
     manufacturer: text("manufacturer").notNull().default(""),
+    name: text("name").notNull().default(""), // human label, e.g. "RES 47 OHM 1% 0603"
+    category: text("category").notNull().default(""), // e.g. "Resistor", "Capacitor", "IC"
+    package: text("package").notNull().default(""), // size/footprint, e.g. "0603", "SOIC-14", "TH"
     description: text("description").notNull().default(""),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("parts_mpn_uq").on(t.mpn)],
+  (t) => [
+    uniqueIndex("parts_mpn_uq").on(t.mpn),
+    index("parts_category_idx").on(t.category),
+    index("parts_package_idx").on(t.package),
+  ],
 );
 
 export const locations = pgTable(

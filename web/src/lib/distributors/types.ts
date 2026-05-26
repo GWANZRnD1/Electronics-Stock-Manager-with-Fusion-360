@@ -11,6 +11,8 @@ export interface DistributorOffer {
   mpn: string;
   manufacturer: string;
   description: string;
+  category: string;
+  package: string;
   distributorPartNumber: string;
   stock: number;
   priceBreaks: PriceBreak[];

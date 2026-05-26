@@ -12,6 +12,8 @@ export function lcscSearch(mpn: string): DistributorOffer {
     mpn,
     manufacturer: "",
     description: "",
+    category: "",
+    package: "",
     distributorPartNumber: "",
     stock: 0,
     priceBreaks: [],

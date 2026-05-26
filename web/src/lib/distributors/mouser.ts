@@ -14,6 +14,7 @@ interface MouserPart {
   MouserPartNumber?: string;
   ManufacturerPartNumber?: string;
   Manufacturer?: string;
+  Category?: string;
   Description?: string;
   Availability?: string; // e.g. "625 In Stock"
   PriceBreaks?: { Quantity?: number; Price?: string; Currency?: string }[];
@@ -71,6 +72,8 @@ export async function mouserSearch(mpn: string): Promise<DistributorOffer | null
     mpn: part.ManufacturerPartNumber ?? mpn,
     manufacturer: part.Manufacturer ?? "",
     description: part.Description ?? "",
+    category: part.Category ?? "",
+    package: "",
     distributorPartNumber: part.MouserPartNumber ?? "",
     stock: parseStock(part.Availability),
     priceBreaks,
@@ -86,6 +89,8 @@ function mockOffer(mpn: string): DistributorOffer {
     mpn,
     manufacturer: "(mock)",
     description: "Set MOUSER_API_KEY for live data",
+    category: "",
+    package: "",
     distributorPartNumber: "",
     stock: 0,
     priceBreaks: [],

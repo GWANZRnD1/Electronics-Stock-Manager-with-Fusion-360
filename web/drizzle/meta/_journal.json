@@ -8,6 +8,13 @@
       "when": 1779790612291,
       "tag": "0000_public_iron_monger",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1779801559451,
+      "tag": "0001_boring_black_knight",
+      "breakpoints": true
     }
   ]
 }

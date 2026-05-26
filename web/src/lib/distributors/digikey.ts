@@ -44,6 +44,8 @@ interface DkProduct {
   ManufacturerProductNumber?: string;
   Manufacturer?: { Name?: string };
   Description?: { ProductDescription?: string };
+  Category?: { Name?: string };
+  Parameters?: { ParameterText?: string; ValueText?: string }[];
   QuantityAvailable?: number;
   ProductUrl?: string;
   DatasheetUrl?: string;
@@ -51,6 +53,17 @@ interface DkProduct {
     DigiKeyProductNumber?: string;
     StandardPricing?: { BreakQuantity?: number; UnitPrice?: number }[];
   }[];
+}
+
+const PACKAGE_PARAMS = ["package / case", "supplier device package", "package", "case / package"];
+
+function dkPackage(params: DkProduct["Parameters"]): string {
+  for (const p of params ?? []) {
+    if (PACKAGE_PARAMS.includes((p.ParameterText ?? "").toLowerCase()) && p.ValueText) {
+      return p.ValueText;
+    }
+  }
+  return "";
 }
 
 export async function digikeySearch(mpn: string): Promise<DistributorOffer | null> {
@@ -85,6 +98,8 @@ export async function digikeySearch(mpn: string): Promise<DistributorOffer | nul
     mpn: product.ManufacturerProductNumber ?? mpn,
     manufacturer: product.Manufacturer?.Name ?? "",
     description: product.Description?.ProductDescription ?? "",
+    category: product.Category?.Name ?? "",
+    package: dkPackage(product.Parameters),
     distributorPartNumber: variation?.DigiKeyProductNumber ?? "",
     stock: product.QuantityAvailable ?? 0,
     priceBreaks,
@@ -100,6 +115,8 @@ function mockOffer(mpn: string): DistributorOffer {
     mpn,
     manufacturer: "(mock)",
     description: "Set DIGIKEY_CLIENT_ID/SECRET for live data",
+    category: "",
+    package: "",
     distributorPartNumber: "",
     stock: 0,
     priceBreaks: [],

@@ -4,6 +4,9 @@ import { z } from "zod";
 export const createPartSchema = z.object({
   mpn: z.string().trim().min(1).max(128),
   manufacturer: z.string().trim().max(128).optional(),
+  name: z.string().trim().max(256).optional(),
+  category: z.string().trim().max(64).optional(),
+  package: z.string().trim().max(64).optional(),
   description: z.string().trim().max(512).optional(),
 });
 
