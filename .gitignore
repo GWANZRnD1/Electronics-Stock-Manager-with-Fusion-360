@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.db
+*.sqlite3
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.local
+
+# Fusion add-in vendored libs (downloaded, not committed)
+fusion/addin/lib/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
