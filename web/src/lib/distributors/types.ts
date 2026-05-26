@@ -1,0 +1,25 @@
+export type DistributorId = "digikey" | "mouser";
+
+export interface PriceBreak {
+  quantity: number;
+  unitPrice: number;
+  currency: string;
+}
+
+export interface DistributorOffer {
+  distributor: DistributorId;
+  mpn: string;
+  manufacturer: string;
+  description: string;
+  distributorPartNumber: string;
+  stock: number;
+  priceBreaks: PriceBreak[];
+  productUrl: string;
+  datasheetUrl: string | null;
+  mock: boolean; // true when returned by sandbox/mock fallback (no API key configured)
+}
+
+export interface LookupResult {
+  mpn: string;
+  offers: DistributorOffer[];
+}
