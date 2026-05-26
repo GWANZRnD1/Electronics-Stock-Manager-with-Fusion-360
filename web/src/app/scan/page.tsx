@@ -12,6 +12,15 @@ interface Location {
   name: string;
 }
 
+interface Offer {
+  distributor: string;
+  manufacturer: string;
+  description: string;
+  category: string;
+  package: string;
+  mock: boolean;
+}
+
 const inputClass =
   "w-full rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20";
 
@@ -28,6 +37,11 @@ export default function ScanPage() {
   const [manual, setManual] = useState("");
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const [manufacturer, setManufacturer] = useState("");
+  const [name, setName] = useState("");
+  const [category, setCategory] = useState("");
+  const [pkg, setPkg] = useState("");
+  const [looking, setLooking] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -44,6 +58,32 @@ export default function ScanPage() {
       controlsRef.current?.stop();
     };
   }, []);
+
+  // Auto-read part info (category/size/manufacturer/name) from DigiKey/Mouser by MPN.
+  useEffect(() => {
+    const m = mpn.trim();
+    if (m.length < 3) return;
+    const handle = setTimeout(() => {
+      void (async () => {
+        setLooking(true);
+        try {
+          const r = await jget<{ offers: Offer[] }>(`/api/parts/lookup?mpn=${encodeURIComponent(m)}`);
+          const o = r.offers.find((x) => !x.mock && (x.manufacturer || x.category || x.package));
+          if (o) {
+            setManufacturer(o.manufacturer || "");
+            setCategory(o.category || "");
+            setPkg(o.package || "");
+            setName(o.description || "");
+          }
+        } catch {
+          /* lookup is best-effort */
+        } finally {
+          setLooking(false);
+        }
+      })();
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [mpn]);
 
   function applyRaw(raw: string) {
     try {
@@ -103,11 +143,19 @@ export default function ScanPage() {
         mpn: mpn.trim(),
         locationId: Number(locationId),
         quantity: Number(qty),
+        manufacturer,
+        name,
+        category,
+        package: pkg,
       });
       setMsg(`Received ${qty} × ${mpn.trim()} → on hand ${r.quantity}.`);
       setMpn("");
       setQty("");
       setScanInfo("");
+      setManufacturer("");
+      setName("");
+      setCategory("");
+      setPkg("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Receive failed.");
     }
@@ -183,6 +231,35 @@ export default function ScanPage() {
             placeholder="MPN"
             value={mpn}
             onChange={(e) => setMpn(e.target.value)}
+          />
+          {looking && (
+            <p className="text-xs text-black/50 dark:text-white/50">Reading part info…</p>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              className={inputClass}
+              placeholder="Category"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            />
+            <input
+              className={inputClass}
+              placeholder="Size (0603, TH…)"
+              value={pkg}
+              onChange={(e) => setPkg(e.target.value)}
+            />
+          </div>
+          <input
+            className={inputClass}
+            placeholder="Manufacturer"
+            value={manufacturer}
+            onChange={(e) => setManufacturer(e.target.value)}
+          />
+          <input
+            className={inputClass}
+            placeholder="Name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
           />
           <select
             className={inputClass}

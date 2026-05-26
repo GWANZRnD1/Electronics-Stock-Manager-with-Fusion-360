@@ -69,12 +69,35 @@ export async function receiveStock(input: {
   quantity: number;
   actor?: string;
   ref?: string;
+  manufacturer?: string;
+  name?: string;
+  category?: string;
+  package?: string;
 }) {
   const db = getDb();
   return db.transaction(async (tx) => {
     let [part] = await tx.select().from(parts).where(eq(parts.mpn, input.mpn));
     if (!part) {
-      [part] = await tx.insert(parts).values({ mpn: input.mpn }).returning();
+      [part] = await tx
+        .insert(parts)
+        .values({
+          mpn: input.mpn,
+          manufacturer: input.manufacturer ?? "",
+          name: input.name ?? "",
+          category: input.category ?? "",
+          package: input.package ?? "",
+        })
+        .returning();
+    } else {
+      // Backfill any missing metadata without clobbering existing values.
+      const patch: Partial<typeof parts.$inferInsert> = {};
+      if (!part.manufacturer && input.manufacturer) patch.manufacturer = input.manufacturer;
+      if (!part.name && input.name) patch.name = input.name;
+      if (!part.category && input.category) patch.category = input.category;
+      if (!part.package && input.package) patch.package = input.package;
+      if (Object.keys(patch).length > 0) {
+        await tx.update(parts).set(patch).where(eq(parts.id, part.id));
+      }
     }
 
     await tx
@@ -208,4 +231,14 @@ export async function searchCatalog(f: CatalogFilters = {}) {
     .orderBy(parts.category, parts.mpn)
     .limit(f.limit ?? 500);
   return rows.map((r) => ({ ...r, stock: Number(r.stock) }));
+}
+
+/** Distinct non-empty categories, for the search dropdown. */
+export async function listCategories(): Promise<string[]> {
+  const rows = await getDb()
+    .selectDistinct({ category: parts.category })
+    .from(parts)
+    .where(sql`${parts.category} <> ''`)
+    .orderBy(parts.category);
+  return rows.map((r) => r.category);
 }

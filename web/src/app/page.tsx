@@ -61,6 +61,7 @@ export default function Home() {
   const [filters, setFilters] = useState<Filters>(EMPTY);
   const [advanced, setAdvanced] = useState(false);
   const [rows, setRows] = useState<CatalogRow[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [fabOpen, setFabOpen] = useState(false);
@@ -80,6 +81,21 @@ export default function Home() {
     }, 300);
     return () => clearTimeout(handle);
   }, [filters, refreshKey]);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const cats = await jget<string[]>("/api/parts/categories");
+        if (active) setCategories(cats);
+      } catch {
+        /* best-effort */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [refreshKey]);
 
   const set = (k: keyof Filters) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setFilters((f) => ({ ...f, [k]: e.target.value }));
@@ -109,7 +125,18 @@ export default function Home() {
 
         {advanced && (
           <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-            <input className={inputClass} placeholder="Category" value={filters.category} onChange={set("category")} />
+            <select
+              className={inputClass}
+              value={filters.category}
+              onChange={(e) => setFilters((f) => ({ ...f, category: e.target.value }))}
+            >
+              <option value="">All categories</option>
+              {categories.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
             <input className={inputClass} placeholder="Name" value={filters.name} onChange={set("name")} />
             <input className={inputClass} placeholder="Manufacturer" value={filters.manufacturer} onChange={set("manufacturer")} />
             <input className={inputClass} placeholder="MPN" value={filters.mpn} onChange={set("mpn")} />
