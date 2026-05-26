@@ -39,6 +39,11 @@ export const replaceBomSchema = z.object({
   lines: z.array(bomLineInputSchema).max(5_000),
 });
 
+export const buildSchema = z.object({
+  quantity: z.number().int().positive().max(100_000),
+  actor: z.string().trim().max(64).optional(),
+});
+
 export const librarySyncSchema = z.object({
   parts: z
     .array(

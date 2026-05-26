@@ -33,6 +33,14 @@ interface ShortageReport {
   shortages: ShortageLine[];
 }
 
+interface BuildRow {
+  id: number;
+  quantity: number;
+  status: string;
+  createdAt: string;
+  completedAt: string | null;
+}
+
 interface BomLineInput {
   partMpn: string | null;
   value: string;
@@ -65,6 +73,11 @@ function bomToText(rows: BomRow[]): string {
     .join("\n");
 }
 
+function fmtDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
 const inputClass =
   "w-full rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20";
 const btnClass =
@@ -80,18 +93,22 @@ export default function BoardDetailPage() {
   const [savedMsg, setSavedMsg] = useState("");
   const [batchMsg, setBatchMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [buildList, setBuildList] = useState<BuildRow[]>([]);
+  const [buildMsg, setBuildMsg] = useState("");
 
   useEffect(() => {
     let active = true;
     void (async () => {
       try {
-        const [boardList, bom] = await Promise.all([
+        const [boardList, bom, blds] = await Promise.all([
           jget<{ id: number; name: string }[]>("/api/boards"),
           jget<BomRow[]>(`/api/boards/${id}/bom`),
+          jget<BuildRow[]>(`/api/boards/${id}/builds`),
         ]);
         if (!active) return;
         setBoardName(boardList.find((b) => String(b.id) === String(id))?.name ?? `Board ${id}`);
         setBomText(bomToText(bom));
+        setBuildList(blds);
       } catch (e) {
         if (active && e instanceof Error && e.message !== "locked") setError(e.message);
       }
@@ -124,6 +141,44 @@ export default function BoardDetailPage() {
       setReport(await jget<ShortageReport>(`/api/boards/${id}/shortage?count=${Number(count) || 0}`));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshBuilds() {
+    try {
+      setBuildList(await jget<BuildRow[]>(`/api/boards/${id}/builds`));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function buildNow() {
+    const qty = Number(count) || 0;
+    if (qty < 1) {
+      setBuildMsg("Enter how many boards to build.");
+      return;
+    }
+    setBusy(true);
+    setBuildMsg("");
+    try {
+      const r = await jpost<{ consumed: { mpn: string }[]; untracked: number }>(
+        `/api/boards/${id}/build`,
+        { quantity: qty },
+      );
+      setBuildMsg(
+        `Built ${qty} — consumed ${r.consumed.length} part type(s)` +
+          (r.untracked ? `, ${r.untracked} untracked (no MPN).` : "."),
+      );
+      await refreshBuilds();
+      await check(); // re-run shortage to show updated stock
+    } catch (e) {
+      if (e instanceof Error && e.message === "insufficient stock") {
+        setBuildMsg("Not enough stock — run 'Check shortage' to see what's missing.");
+      } else {
+        setBuildMsg(e instanceof Error ? e.message : "Build failed.");
+      }
     } finally {
       setBusy(false);
     }
@@ -201,9 +256,33 @@ export default function BoardDetailPage() {
             <button className={btnClass} onClick={check} disabled={busy}>
               {busy ? "Checking…" : "Check shortage"}
             </button>
+            <button
+              className="rounded-md bg-green-700 px-4 py-2 font-medium text-white hover:bg-green-600 disabled:opacity-50"
+              onClick={buildNow}
+              disabled={busy}
+            >
+              Build &amp; consume
+            </button>
           </div>
+          {buildMsg && <p className="mt-2 text-sm text-black/70 dark:text-white/70">{buildMsg}</p>}
 
           {report && <ShortageView report={report} onDigikeyBatch={digikeyBatch} batchMsg={batchMsg} />}
+
+          {buildList.length > 0 && (
+            <div className="mt-6">
+              <h3 className="mb-2 font-medium">Build history</h3>
+              <ul className="divide-y divide-black/10 rounded-lg border border-black/10 text-sm dark:divide-white/10 dark:border-white/15">
+                {buildList.map((b) => (
+                  <li key={b.id} className="flex items-center justify-between px-3 py-2">
+                    <span>{b.quantity} board(s)</span>
+                    <span className="text-black/50 dark:text-white/50">
+                      {fmtDate(b.completedAt ?? b.createdAt)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </section>
       </main>
     </>
