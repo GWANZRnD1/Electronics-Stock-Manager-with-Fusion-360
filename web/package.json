@@ -17,6 +17,8 @@
     "db:reset": "tsx scripts/db-reset.ts"
   },
   "dependencies": {
+    "@zxing/browser": "^0.2.0",
+    "@zxing/library": "^0.21.3",
     "drizzle-orm": "^0.45.2",
     "next": "16.2.6",
     "postgres": "^3.4.9",
