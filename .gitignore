@@ -25,6 +25,9 @@ dist/
 # Fusion add-in vendored libs (downloaded, not committed)
 fusion/addin/lib/
 
+# Fusion sync script local config (contains the API token)
+fusion/addin/**/config.json
+
 # OS / editor
 .DS_Store
 Thumbs.db

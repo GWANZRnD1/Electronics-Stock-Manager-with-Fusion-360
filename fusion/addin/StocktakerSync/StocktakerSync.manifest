@@ -1,0 +1,13 @@
+{
+  "autodeskProduct": "Fusion360",
+  "type": "script",
+  "id": "b7e2c1a4-9f3d-4c5e-8a1b-2d6f7e9c0a31",
+  "author": "GWANZR",
+  "description": {
+    "": "Sync the Fusion Electronics library to the Electronics Stock Manager catalog."
+  },
+  "version": "0.1.0",
+  "runOnStartup": false,
+  "supportedOS": "windows|mac",
+  "editEnabled": true
+}

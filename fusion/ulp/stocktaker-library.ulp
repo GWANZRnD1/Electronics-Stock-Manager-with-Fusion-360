@@ -1,0 +1,53 @@
+#usage "en: <b>Export the open Electronics library's parts to a TSV</b> for the "
+       "Electronics Stock Manager sync script. Run this from the Library editor "
+       "with your shared library open. Outputs columns: mpn, manufacturer.\n"
+
+// NOTE: This is best-effort and must be verified in Fusion. The attribute names
+// and the device/technology path below follow the Eagle ULP model; if your
+// library stores the MPN under a different attribute name, add it to the list,
+// or send me a sample of the output and I'll adjust the mapping.
+
+string fileName;
+
+if (library) {
+  library(L) {
+    fileName = dlgFileSave("Save library export for Stock Manager",
+                           "library_parts.txt",
+                           "Text files (*.txt);;All files (*)");
+    if (fileName != "") {
+      output(fileName, "wt") {
+        printf("mpn\tmanufacturer\n");
+        L.devicesets(DS) {
+          DS.devices(D) {
+            D.technologies(T) {
+              string mpn = "";
+              string mfr = "";
+              T.attributes(A) {
+                string n = strupr(A.name);
+                if (A.value != "" &&
+                    (n == "MPN" || n == "MANUFACTURER_PART_NUMBER" ||
+                     n == "MANUFACTURERPARTNUMBER" || n == "MFR_PN" ||
+                     n == "MF_PARTNUMBER" || n == "PART_NUMBER")) {
+                  mpn = A.value;
+                }
+                if (A.value != "" &&
+                    (n == "MANUFACTURER" || n == "MFR" || n == "MF_NAME" ||
+                     n == "MANUFACTURER_NAME")) {
+                  mfr = A.value;
+                }
+              }
+              // Only export parts that have an MPN — the app's catalog keys on MPN.
+              if (mpn != "") {
+                printf("%s\t%s\n", mpn, mfr);
+              }
+            }
+          }
+        }
+      }
+      dlgMessageBox("Library exported to:\n" + fileName +
+                    "\n\nNow run the 'StocktakerSync' script and pick this file.");
+    }
+  }
+} else {
+  dlgMessageBox("Open this ULP from the Library editor (it reads the currently open library).");
+}
