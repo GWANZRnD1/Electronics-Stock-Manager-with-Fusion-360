@@ -7,8 +7,9 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { GATE_COOKIE, expectedToken } from "@/lib/auth/gate";
 
-// /api/cron is bypassed by the PIN gate and protected by CRON_SECRET instead.
-const PUBLIC_PATHS = ["/unlock", "/api/unlock", "/api/cron"];
+// /api/cron and /api/fusion bypass the PIN gate (machine-to-machine); they are
+// protected by CRON_SECRET / FUSION_API_TOKEN respectively.
+const PUBLIC_PATHS = ["/unlock", "/api/unlock", "/api/cron", "/api/fusion"];
 
 export async function proxy(request: NextRequest) {
   const expected = await expectedToken();

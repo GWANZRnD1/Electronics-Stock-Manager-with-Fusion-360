@@ -96,3 +96,62 @@ export async function receiveStock(input: {
     return { part, quantity: updated?.quantity ?? input.quantity };
   });
 }
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/** Bulk upsert parts by MPN (the Fusion library sync). Non-empty fields win on update. */
+export async function upsertParts(
+  items: { mpn: string; manufacturer?: string; description?: string }[],
+): Promise<number> {
+  const byMpn = new Map<string, { mpn: string; manufacturer: string; description: string }>();
+  for (const it of items) {
+    const mpn = it.mpn.trim();
+    if (mpn) {
+      byMpn.set(mpn, {
+        mpn,
+        manufacturer: (it.manufacturer ?? "").trim(),
+        description: (it.description ?? "").trim(),
+      });
+    }
+  }
+  const values = [...byMpn.values()];
+  if (values.length === 0) return 0;
+
+  const db = getDb();
+  for (const part of chunk(values, 1000)) {
+    await db
+      .insert(parts)
+      .values(part)
+      .onConflictDoUpdate({
+        target: parts.mpn,
+        set: {
+          manufacturer: sql`CASE WHEN excluded.manufacturer <> '' THEN excluded.manufacturer ELSE ${parts.manufacturer} END`,
+          description: sql`CASE WHEN excluded.description <> '' THEN excluded.description ELSE ${parts.description} END`,
+          updatedAt: sql`now()`,
+        },
+      });
+  }
+  return values.length;
+}
+
+/** Every part in the catalog with its total on-hand quantity (0 when never stocked). */
+export async function listCatalog(limit = 1000) {
+  const rows = await getDb()
+    .select({
+      id: parts.id,
+      mpn: parts.mpn,
+      manufacturer: parts.manufacturer,
+      description: parts.description,
+      stock: sql<number>`COALESCE(SUM(${stockItems.quantity}), 0)`,
+    })
+    .from(parts)
+    .leftJoin(stockItems, eq(stockItems.partId, parts.id))
+    .groupBy(parts.id)
+    .orderBy(parts.mpn)
+    .limit(limit);
+  return rows.map((r) => ({ ...r, stock: Number(r.stock) }));
+}

@@ -39,6 +39,27 @@ export const replaceBomSchema = z.object({
   lines: z.array(bomLineInputSchema).max(5_000),
 });
 
+export const librarySyncSchema = z.object({
+  parts: z
+    .array(
+      z.object({
+        mpn: z.string().trim().min(1).max(128),
+        manufacturer: z.string().trim().max(128).optional(),
+        description: z.string().trim().max(512).optional(),
+      }),
+    )
+    .max(10_000),
+});
+
+export const fusionImportSchema = z.object({
+  board: z.object({
+    name: z.string().trim().min(1).max(128),
+    fusionDocId: z.string().trim().max(256).optional().nullable(),
+    revision: z.string().trim().max(64).optional(),
+  }),
+  lines: z.array(bomLineInputSchema).max(5_000),
+});
+
 export const digikeyBatchSchema = z.object({
   items: z
     .array(

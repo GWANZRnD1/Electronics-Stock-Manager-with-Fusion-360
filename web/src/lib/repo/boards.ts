@@ -14,6 +14,42 @@ export async function createBoard(input: { name: string }) {
   return row;
 }
 
+/** Find a board by Fusion doc id (preferred) or name, updating it; create if absent. */
+export async function upsertBoard(input: {
+  name: string;
+  fusionDocId?: string | null;
+  revision?: string;
+}) {
+  const db = getDb();
+
+  if (input.fusionDocId) {
+    const [byDoc] = await db.select().from(boards).where(eq(boards.fusionDocId, input.fusionDocId));
+    if (byDoc) {
+      const revision = input.revision ?? byDoc.revision;
+      await db.update(boards).set({ name: input.name, revision }).where(eq(boards.id, byDoc.id));
+      return { ...byDoc, name: input.name, revision };
+    }
+  }
+
+  const [byName] = await db.select().from(boards).where(eq(boards.name, input.name));
+  if (byName) {
+    const fusionDocId = input.fusionDocId ?? byName.fusionDocId;
+    const revision = input.revision ?? byName.revision;
+    await db.update(boards).set({ fusionDocId, revision }).where(eq(boards.id, byName.id));
+    return { ...byName, fusionDocId, revision };
+  }
+
+  const [created] = await db
+    .insert(boards)
+    .values({
+      name: input.name,
+      fusionDocId: input.fusionDocId ?? null,
+      revision: input.revision ?? "",
+    })
+    .returning();
+  return created;
+}
+
 export async function getBoard(id: number) {
   const [row] = await getDb().select().from(boards).where(eq(boards.id, id));
   return row ?? null;
