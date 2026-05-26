@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { Nav } from "@/components/Nav";
+
 interface Location {
   id: number;
   name: string;
@@ -84,7 +86,9 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 p-6">
+    <>
+      <Nav />
+      <main className="mx-auto w-full max-w-5xl flex-1 p-6">
       <header className="mb-6">
         <h1 className="text-2xl font-semibold tracking-tight">Electronics Stock Manager</h1>
         <p className="text-sm text-black/60 dark:text-white/60">
@@ -104,7 +108,8 @@ export default function Home() {
       </div>
 
       <StockTable rows={stock} />
-    </main>
+      </main>
+    </>
   );
 }
 
