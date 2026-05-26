@@ -1,0 +1,31 @@
+name: Database backup
+
+# Weekly pg_dump uploaded as a workflow artifact (Supabase free has no auto-backup).
+# Needs the DATABASE_URL repo secret. Also counts as activity, but the keep-alive
+# workflow is what guarantees the project never hits the 7-day idle pause.
+
+on:
+  schedule:
+    - cron: "0 7 * * 0" # Sundays, 07:00 UTC
+  workflow_dispatch:
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: pg_dump
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          # pg_dump needs a session connection — use the session pooler (5432), not 6543.
+          SESSION_URL="${DATABASE_URL/:6543/:5432}"
+          STAMP="$(date -u +%Y%m%d-%H%M)"
+          # postgres:17 client can dump any current Supabase version (pg_dump is
+          # compatible with same-or-older servers). Bump the tag if your server is newer.
+          docker run --rm postgres:17 pg_dump --no-owner --no-privileges "$SESSION_URL" > "backup-$STAMP.sql"
+          ls -lh "backup-$STAMP.sql"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db-backup
+          path: backup-*.sql
+          retention-days: 30
