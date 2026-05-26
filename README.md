@@ -31,18 +31,24 @@ plain HTTP, so the backend language (TypeScript) is irrelevant to it. See
 ```powershell
 cd web
 npm install
-npm run dev      # http://localhost:3000
-npm run test     # vitest (domain-logic tests)
+npm run db:migrate   # first time only — creates the tables (needs DATABASE_URL)
+npm run dev          # http://localhost:3000  (enter the ACCESS_PIN)
+npm run test         # vitest (domain-logic tests)
 ```
+
+Full run/deploy instructions: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Environment variables
 
-Copy `web/.env.example` to `web/.env.local` and fill it in (these are
-server-only secrets — never exposed to the client). If distributor keys are
-empty, the adapters run in sandbox/mock mode. For cloud deploys, set the same
-values as Vercel project environment variables. See
-[docs/DISTRIBUTOR_API_SETUP.md](docs/DISTRIBUTOR_API_SETUP.md) for how to issue
-DigiKey/Mouser keys.
+Copy `web/.env.example` to `web/.env.local` and fill it in (server-only secrets —
+never exposed to the client):
+
+- `DATABASE_URL` — Supabase Postgres **Transaction pooler** URI (port 6543)
+- `ACCESS_PIN` — shared PIN that gates the app (unset ⇒ gate disabled)
+- distributor keys — optional; empty ⇒ adapters run in sandbox/mock mode
+
+For cloud deploys, set the same values as Vercel project environment variables. See
+[docs/DISTRIBUTOR_API_SETUP.md](docs/DISTRIBUTOR_API_SETUP.md) for issuing DigiKey/Mouser keys.
 
 ## Roadmap
 
