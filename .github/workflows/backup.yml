@@ -4,9 +4,9 @@ name: Database backup
 # Needs the DATABASE_URL repo secret. Also counts as activity, but the keep-alive
 # workflow is what guarantees the project never hits the 7-day idle pause.
 
+# Schedule disabled while the GitHub account suspension is being resolved.
+# Restore the cron once the account is reinstated.
 on:
-  schedule:
-    - cron: "0 7 * * 0" # Sundays, 07:00 UTC
   workflow_dispatch:
 
 jobs:

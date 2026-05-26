@@ -1,9 +1,10 @@
 name: CI
 
+# Auto-triggers disabled while the GitHub account suspension is being resolved
+# (a suspended account makes actions/checkout fail with 403 on every run).
+# Restore `push`/`pull_request` here once the account is reinstated.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 defaults:
   run:
