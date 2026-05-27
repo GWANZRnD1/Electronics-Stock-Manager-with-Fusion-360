@@ -673,6 +673,13 @@ export async function syncFromDistributors(
         const d = deriveField(offers, "description");
         if (d) patch.description = d;
       }
+      // Backfill a blank SPN from the distributor's own part number (e.g. the
+      // Mouser "584-…" number, which isn't printed in the scanned DataMatrix).
+      if (isApi && t.spn === "") {
+        const offer = live.find((o) => o.distributor === supplier) ?? live[0];
+        const dpn = offer?.distributorPartNumber?.trim() ?? "";
+        if (dpn) patch.spn = dpn;
+      }
       // SPN → MPN: fill a blank MPN from the distributor's own offer, guarding the
       // partial unique index — skip (don't crash the batch) if another part owns it.
       if (isApi && t.mpn === "") {

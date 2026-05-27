@@ -18,6 +18,7 @@ interface Offer {
   description: string;
   category: string;
   package: string;
+  distributorPartNumber: string;
   mock: boolean;
 }
 
@@ -127,10 +128,11 @@ export default function ScanPage() {
     };
   }, []);
 
-  // Auto-read part info (category/size/manufacturer/name) from DigiKey/Mouser by MPN.
+  // Auto-read part info (category/size/manufacturer/name/SPN) from DigiKey/Mouser by MPN.
   useEffect(() => {
     const m = mpn.trim();
     if (m.length < 3) return;
+    const sup = supplier.toLowerCase();
     const handle = setTimeout(() => {
       void (async () => {
         setLooking(true);
@@ -143,6 +145,12 @@ export default function ScanPage() {
             setPkg(o.package || "");
             setName(o.description || "");
           }
+          // The supplier part number (e.g. Mouser "584-…") isn't in the scanned
+          // DataMatrix; pull it from the matching distributor's live offer.
+          const match = r.offers.find(
+            (x) => !x.mock && x.distributor === sup && x.distributorPartNumber,
+          );
+          if (match) setSpn((cur) => cur || match.distributorPartNumber);
         } catch {
           /* lookup is best-effort */
         } finally {
@@ -151,7 +159,7 @@ export default function ScanPage() {
       })();
     }, 500);
     return () => clearTimeout(handle);
-  }, [mpn]);
+  }, [mpn, supplier]);
 
   function applyRaw(raw: string) {
     setRawText(raw);
