@@ -150,6 +150,7 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     scr,
+    enrichedRows: enriched,
     summary: {
       rows: rows.length,
       enrichedRows: changes.length,
