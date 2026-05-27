@@ -31,15 +31,28 @@ describe("parseLabel", () => {
     expect(label.labelFormat).toBe("ecia_datamatrix");
   });
 
-  it("parses a Mouser DataMatrix with a malformed header", () => {
+  it("identifies Mouser from its malformed header", () => {
     const raw = ">[)>06" + GS + "1PSTM32F103C8T6" + GS + "Q25" + RS + EOT;
 
     const label = parseLabel(raw);
 
     expect(label.mpn).toBe("STM32F103C8T6");
     expect(label.quantity).toBe(25);
-    expect(label.distributor).toBe("unknown");
+    expect(label.distributor).toBe("mouser");
     expect(label.labelFormat).toBe("ecia_datamatrix");
+  });
+
+  it("identifies Mouser from a stock-number customer part", () => {
+    const label = parseLabel(ecia("P595-HMC905LP3ETR", "1PHMC905LP3ETR", "Q2"));
+
+    expect(label.distributor).toBe("mouser");
+    expect(label.mpn).toBe("HMC905LP3ETR");
+    expect(label.quantity).toBe(2);
+  });
+
+  it("identifies DigiKey from packaging suffixes other than -ND", () => {
+    expect(parseLabel(ecia("P296-1234-2-CT", "1PABC123", "Q5")).distributor).toBe("digikey");
+    expect(parseLabel(ecia("P296-1234-6-TR", "1PABC123", "Q5")).distributor).toBe("digikey");
   });
 
   it("parses an LCSC QR blob", () => {

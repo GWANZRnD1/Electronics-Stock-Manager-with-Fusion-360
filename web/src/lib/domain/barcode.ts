@@ -122,8 +122,10 @@ function parseLcsc(text: string): ScannedLabel {
 
 function parseEcia(text: string): ScannedLabel {
   let body = text.split(RS + EOT)[0];
+  let matchedHeader = "";
   for (const header of ECIA_HEADERS) {
     if (body.startsWith(header)) {
+      matchedHeader = header;
       body = body.slice(header.length);
       break;
     }
@@ -137,7 +139,7 @@ function parseEcia(text: string): ScannedLabel {
     fields[DATA_IDENTIFIERS[di]] = token.slice(di.length);
   }
   return {
-    distributor: guessEciaDistributor(fields),
+    distributor: guessEciaDistributor(fields, matchedHeader),
     mpn: fields.mpn || null,
     quantity: toInt(fields.quantity),
     distributorPart: fields.customerPart || fields.distributorPart || null,
@@ -153,8 +155,18 @@ function matchDi(token: string): string | null {
   return null;
 }
 
-function guessEciaDistributor(fields: Record<string, string>): Distributor {
-  return (fields.customerPart ?? "").endsWith("-ND") ? "digikey" : "unknown";
+/**
+ * Identify the distributor from an ECIA label. DigiKey part numbers carry a
+ * packaging suffix (-ND/-CT/-TR/-DKR); Mouser stock numbers are "<digits>-<mpn>"
+ * with no such suffix, and Mouser's labels use the malformed ">[)>06" header
+ * (leading ">", missing RS). DigiKey is checked first so a DigiKey part that
+ * also starts with digits (e.g. "296-1234-2-CT") isn't mistaken for Mouser.
+ */
+function guessEciaDistributor(fields: Record<string, string>, header: string): Distributor {
+  const cust = (fields.customerPart ?? "").toUpperCase().trim();
+  if (/-(ND|CT|TR|DKR)$/.test(cust)) return "digikey";
+  if (/^\d{2,4}-\w/.test(cust) || header === ">[)>06") return "mouser";
+  return "unknown";
 }
 
 function looksLikeLcscPart(text: string): boolean {
