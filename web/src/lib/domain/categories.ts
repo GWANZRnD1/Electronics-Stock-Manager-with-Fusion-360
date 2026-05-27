@@ -29,16 +29,18 @@ export function categoryKey(raw: string): string {
 
 /**
  * Pick the representative spelling for a group of variants that share a key.
- * Most frequent wins; ties break toward the shorter (usually singular) then
- * alphabetical spelling. Preserves the casing the user actually typed, so
- * acronyms like "IC" or "LED" survive instead of being Title-cased.
+ * Shortest (cleanest) wins — so the short form users type ("Connectors") beats
+ * a distributor's verbose name ("Connectors, Interconnects") even when the
+ * verbose one is more common; ties break toward the more frequent, then
+ * alphabetical. Preserves the casing the user typed, so acronyms like "IC" or
+ * "LED" survive instead of being Title-cased.
  */
 export function pickCategoryLabel(variants: { label: string; count: number }[]): string {
   return (
     [...variants].sort(
       (a, b) =>
-        b.count - a.count ||
         a.label.length - b.label.length ||
+        b.count - a.count ||
         a.label.localeCompare(b.label),
     )[0]?.label ?? ""
   );

@@ -61,6 +61,15 @@ describe("pickCategoryLabel", () => {
       ]),
     ).toBe("Resistor");
   });
+
+  it("prefers the shorter label even when a verbose variant is more common", () => {
+    expect(
+      pickCategoryLabel([
+        { label: "Connectors, Interconnects", count: 9 },
+        { label: "Connectors", count: 2 },
+      ]),
+    ).toBe("Connectors");
+  });
 });
 
 describe("bundleCategories", () => {

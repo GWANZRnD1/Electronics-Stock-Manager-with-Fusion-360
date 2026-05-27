@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Nav } from "@/components/Nav";
 import { Modal, btn, inputClass } from "@/components/ui";
@@ -250,82 +250,12 @@ export default function Home() {
   );
 }
 
-/**
- * Horizontally scrollable container. A plain mouse wheel scrolls the page as
- * usual; holding Alt while scrolling moves the table sideways (a deliberate
- * gesture, so reading the page never gets hijacked). Shift+wheel, trackpad
- * swipes, and the native scrollbar also work, and text stays selectable. Fade
- * shadows mark hidden content.
- */
-function HScroll({
-  children,
-  onScrollableChange,
-}: {
-  children: React.ReactNode;
-  onScrollableChange?: (scrollable: boolean) => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [shadow, setShadow] = useState({ left: false, right: false });
-
-  function update() {
-    const el = ref.current;
-    if (!el) return;
-    const left = el.scrollLeft > 1;
-    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
-    setShadow({ left, right });
-    onScrollableChange?.(left || right);
-  }
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    if (el.firstElementChild) ro.observe(el.firstElementChild);
-
-    // Alt+wheel scrolls the table sideways. A plain wheel is left alone so the
-    // page scrolls normally. Needs a non-passive listener so preventDefault
-    // works (React's onWheel is passive).
-    function onWheel(e: WheelEvent) {
-      if (!e.altKey) return; // only the explicit Alt gesture scrolls horizontally
-      if (el!.scrollWidth <= el!.clientWidth) return; // nothing hidden sideways
-      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-      if (delta === 0) return;
-      el!.scrollLeft += delta;
-      e.preventDefault();
-    }
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => {
-      ro.disconnect();
-      el.removeEventListener("wheel", onWheel);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  return (
-    <div className="relative overflow-hidden rounded-xl border border-black/10 dark:border-white/15">
-      <div ref={ref} onScroll={update} className="overflow-x-auto">
-        {children}
-      </div>
-      {shadow.left && (
-        <div className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-black/15 to-transparent dark:from-black/50" />
-      )}
-      {shadow.right && (
-        <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/15 to-transparent dark:from-black/50" />
-      )}
-    </div>
-  );
-}
-
 function InventoryTable({ rows, onEdit }: { rows: CatalogRow[]; onEdit: (r: CatalogRow) => void }) {
   const [expanded, setExpanded] = useState<number | null>(null);
-  const [scrollable, setScrollable] = useState(false);
   const cols = 12;
   return (
-    <>
-      <HScroll onScrollableChange={setScrollable}>
-        <table className="w-full min-w-[72rem] text-left text-sm">
+    <div className="overflow-x-auto rounded-xl border border-black/10 dark:border-white/15">
+      <table className="w-full min-w-[72rem] text-left text-sm">
         <thead className="text-black/50 dark:text-white/50">
           <tr className="border-b border-black/10 dark:border-white/15">
             <th className="w-6 px-2 py-2" />
@@ -364,13 +294,7 @@ function InventoryTable({ rows, onEdit }: { rows: CatalogRow[]; onEdit: (r: Cata
           )}
         </tbody>
       </table>
-      </HScroll>
-      {scrollable && (
-        <p className="mt-1.5 text-xs text-black/45 dark:text-white/45">
-          ↔ Hold Alt and scroll (or Shift+scroll) to see all columns.
-        </p>
-      )}
-    </>
+    </div>
   );
 }
 
