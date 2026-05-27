@@ -88,7 +88,7 @@ function fmtDate(iso: string | null): string {
 }
 
 export default function Home() {
-  const [view, setView] = useState<"inventory" | "summary">("inventory");
+  const [view, setView] = useState<"inventory" | "summary" | "settings">("inventory");
   const [filters, setFilters] = useState<Filters>(EMPTY);
   const [advanced, setAdvanced] = useState(false);
   const [rows, setRows] = useState<CatalogRow[]>([]);
@@ -96,9 +96,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [fabOpen, setFabOpen] = useState(false);
-  const [modal, setModal] = useState<
-    "part" | "location" | "import" | "enrich" | "refresh" | null
-  >(null);
+  const [modal, setModal] = useState<"part" | "location" | "import" | null>(null);
   const [editing, setEditing] = useState<CatalogRow | null>(null);
 
   useEffect(() => {
@@ -156,11 +154,19 @@ export default function Home() {
             >
               Summary
             </button>
+            <button
+              className={`rounded-md px-3 py-1 ${view === "settings" ? "bg-blue-600 text-white" : "text-black/60 dark:text-white/60"}`}
+              onClick={() => setView("settings")}
+            >
+              Settings
+            </button>
           </div>
         </div>
 
         {view === "summary" ? (
           <SummaryView refreshKey={refreshKey} />
+        ) : view === "settings" ? (
+          <SettingsView onOpenImport={() => setModal("import")} />
         ) : (
           <>
             <div className="mb-3 flex items-center justify-between gap-3">
@@ -227,18 +233,6 @@ export default function Home() {
           setModal("location");
           setFabOpen(false);
         }}
-        onImport={() => {
-          setModal("import");
-          setFabOpen(false);
-        }}
-        onEnrich={() => {
-          setModal("enrich");
-          setFabOpen(false);
-        }}
-        onRefreshCosts={() => {
-          setModal("refresh");
-          setFabOpen(false);
-        }}
       />
 
       {modal === "part" && (
@@ -273,36 +267,6 @@ export default function Home() {
       )}
       {modal === "import" && (
         <ImportModal
-          onClose={() => setModal(null)}
-          onDone={() => {
-            setModal(null);
-            refresh();
-          }}
-        />
-      )}
-      {modal === "enrich" && (
-        <SyncModal
-          title="Enrich values from DigiKey/Mouser"
-          endpoint="/api/parts/enrich"
-          blurb={(n) =>
-            `${n} part${n === 1 ? "" : "s"} missing a value. Each is looked up on DigiKey/Mouser (throttled) to fill the value, plus blank category/size.`
-          }
-          startLabel="Start enrichment"
-          onClose={() => setModal(null)}
-          onDone={() => {
-            setModal(null);
-            refresh();
-          }}
-        />
-      )}
-      {modal === "refresh" && (
-        <SyncModal
-          title="Refresh DigiKey/Mouser costs (USD)"
-          endpoint="/api/parts/refresh-costs"
-          blurb={(n) =>
-            `${n} DigiKey/Mouser part${n === 1 ? "" : "s"} will have their unit cost refreshed from current USD pricing (throttled). LCSC and unidentified parts are left unchanged.`
-          }
-          startLabel="Refresh costs"
           onClose={() => setModal(null)}
           onDone={() => {
             setModal(null);
@@ -664,17 +628,11 @@ function Fab({
   onToggle,
   onAddPart,
   onAddLocation,
-  onImport,
-  onEnrich,
-  onRefreshCosts,
 }: {
   open: boolean;
   onToggle: () => void;
   onAddPart: () => void;
   onAddLocation: () => void;
-  onImport: () => void;
-  onEnrich: () => void;
-  onRefreshCosts: () => void;
 }) {
   const action = "flex items-center gap-2";
   const bubble = "grid h-12 w-12 place-items-center rounded-full text-white shadow-lg";
@@ -687,18 +645,6 @@ function Fab({
           open ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-3 opacity-0"
         }`}
       >
-        <button className={action} onClick={onRefreshCosts}>
-          <span className={label}>Refresh costs ($)</span>
-          <span className={`${bubble} bg-teal-600`}>💲</span>
-        </button>
-        <button className={action} onClick={onEnrich}>
-          <span className={label}>Enrich values</span>
-          <span className={`${bubble} bg-amber-600`}>✨</span>
-        </button>
-        <button className={action} onClick={onImport}>
-          <span className={label}>Import CSV</span>
-          <span className={`${bubble} bg-purple-700`}>📄</span>
-        </button>
         <button className={action} onClick={onAddLocation}>
           <span className={label}>Add location</span>
           <span className={`${bubble} bg-green-700`}>📍</span>
@@ -984,9 +930,30 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
   );
 }
 
+const cardClass = "rounded-xl border border-black/10 p-4 dark:border-white/15";
+
+function SettingsView({ onOpenImport }: { onOpenImport: () => void }) {
+  return (
+    <div className="space-y-4">
+      <section className={cardClass}>
+        <h2 className="mb-1 font-medium">Import inventory CSV</h2>
+        <p className="mb-3 text-sm text-black/60 dark:text-white/60">
+          Bulk-load parts and stock from a CurrentInventory CSV export — optionally wiping all
+          existing data first.
+        </p>
+        <button className={btn} onClick={onOpenImport}>
+          Import CSV…
+        </button>
+      </section>
+      <SyncPanel />
+    </div>
+  );
+}
+
 interface SyncStatus {
   configured: boolean;
-  pending: number;
+  values: number;
+  costs: number;
 }
 
 interface SyncBatch {
@@ -995,34 +962,23 @@ interface SyncBatch {
   nextAfterId: number | null;
 }
 
-/** Drives a resumable distributor batch job (enrich values / refresh costs) with progress. */
-function SyncModal({
-  title,
-  endpoint,
-  blurb,
-  startLabel,
-  onClose,
-  onDone,
-}: {
-  title: string;
-  endpoint: string;
-  blurb: (pending: number) => string;
-  startLabel: string;
-  onClose: () => void;
-  onDone: () => void;
-}) {
+/** Combined, resumable DigiKey/Mouser sync with per-operation toggles (one lookup per part). */
+function SyncPanel() {
   const [status, setStatus] = useState<SyncStatus | null>(null);
+  const [fillValues, setFillValues] = useState(true);
+  const [refreshCosts, setRefreshCosts] = useState(true);
   const [running, setRunning] = useState(false);
   const [swept, setSwept] = useState(0);
   const [updated, setUpdated] = useState(0);
   const [done, setDone] = useState(false);
   const [msg, setMsg] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let active = true;
     void (async () => {
       try {
-        const s = await jget<SyncStatus>(endpoint);
+        const s = await jget<SyncStatus>("/api/parts/sync");
         if (active) setStatus(s);
       } catch (e) {
         if (active && e instanceof Error && e.message !== "locked") setMsg(e.message);
@@ -1031,18 +987,25 @@ function SyncModal({
     return () => {
       active = false;
     };
-  }, [endpoint]);
+  }, [reloadKey]);
 
   async function run() {
     setRunning(true);
     setMsg("");
     setDone(false);
+    setSwept(0);
+    setUpdated(0);
     let afterId = 0;
     let sweptTotal = 0;
     let updatedTotal = 0;
     try {
       for (;;) {
-        const res = await jpost<SyncBatch>(endpoint, { limit: 25, afterId });
+        const res = await jpost<SyncBatch>("/api/parts/sync", {
+          fillValues,
+          refreshCosts,
+          limit: 25,
+          afterId,
+        });
         sweptTotal += res.processed;
         updatedTotal += res.updated;
         setSwept(sweptTotal);
@@ -1052,49 +1015,75 @@ function SyncModal({
         await new Promise((r) => setTimeout(r, 300)); // gentle pause between batches
       }
       setDone(true);
+      setReloadKey((k) => k + 1);
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Operation failed.");
+      setMsg(e instanceof Error ? e.message : "Sync failed.");
     } finally {
       setRunning(false);
     }
   }
 
   return (
-    <Modal title={title} onClose={onClose}>
-      <div className="space-y-3 text-sm">
-        {status === null && !msg && <p className="text-black/50 dark:text-white/50">Loading…</p>}
-        {status && !status.configured && (
-          <p className="rounded-md bg-amber-500/10 px-3 py-2 text-amber-700 dark:text-amber-400">
-            No distributor API configured. Add <code>DIGIKEY_CLIENT_ID</code>/<code>SECRET</code> (and
-            set <code>DIGIKEY_USE_SANDBOX=false</code>) and/or <code>MOUSER_API_KEY</code> to
-            <code> web/.env.local</code>, then restart the dev server.
-          </p>
-        )}
-        {status?.configured && !done && (
-          <>
-            <p className="text-black/70 dark:text-white/70">{blurb(status.pending)}</p>
+    <section className={cardClass}>
+      <h2 className="mb-1 font-medium">Sync from distributors</h2>
+      <p className="mb-3 text-sm text-black/60 dark:text-white/60">
+        Look up DigiKey/Mouser parts to fill details — one lookup per part, throttled to respect API
+        rate limits.
+      </p>
+      {status === null && !msg && <p className="text-sm text-black/50 dark:text-white/50">Loading…</p>}
+      {status && !status.configured && (
+        <p className="rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+          No distributor API configured. Add <code>DIGIKEY_CLIENT_ID</code>/<code>SECRET</code> (and set{" "}
+          <code>DIGIKEY_USE_SANDBOX=false</code>) and/or <code>MOUSER_API_KEY</code> to{" "}
+          <code>web/.env.local</code>, then restart the dev server.
+        </p>
+      )}
+      {status?.configured && (
+        <div className="space-y-2 text-sm">
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={fillValues}
+              onChange={(e) => setFillValues(e.target.checked)}
+              disabled={running}
+            />
+            <span>
+              <span className="font-medium">Fill missing values ({status.values})</span> — component
+              value + blank category/size, looked up by MPN or supplier part #.
+            </span>
+          </label>
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={refreshCosts}
+              onChange={(e) => setRefreshCosts(e.target.checked)}
+              disabled={running}
+            />
+            <span>
+              <span className="font-medium">Refresh unit costs in USD ({status.costs})</span> —
+              DigiKey/Mouser parts only; LCSC and unidentified parts are left unchanged.
+            </span>
+          </label>
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            <button className={btn} onClick={run} disabled={running || (!fillValues && !refreshCosts)}>
+              {running ? "Syncing…" : "Run sync"}
+            </button>
             {running && (
-              <p className="text-black/60 dark:text-white/60">
+              <span className="text-black/60 dark:text-white/60">
                 Swept {swept}… updated {updated}.
-              </p>
+              </span>
             )}
-            <button className={btn} onClick={run} disabled={running || status.pending === 0}>
-              {running ? "Working…" : startLabel}
-            </button>
-          </>
-        )}
-        {done && (
-          <>
-            <p className="rounded-md bg-green-500/10 px-3 py-2 text-green-700 dark:text-green-400">
-              Done — swept {swept} parts, updated {updated}.
-            </p>
-            <button className={btn} onClick={onDone}>
-              Done
-            </button>
-          </>
-        )}
-        {msg && <p className="text-red-600 dark:text-red-400">{msg}</p>}
-      </div>
-    </Modal>
+            {done && !running && (
+              <span className="text-green-700 dark:text-green-400">
+                Done — swept {swept}, updated {updated}.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+      {msg && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{msg}</p>}
+    </section>
   );
 }

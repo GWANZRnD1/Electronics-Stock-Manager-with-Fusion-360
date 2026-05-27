@@ -33,10 +33,14 @@ export const purgeSchema = z.object({
   confirm: z.literal("PURGE"),
 });
 
-export const enrichSchema = z.object({
-  limit: z.number().int().min(1).max(200).optional(),
-  afterId: z.number().int().min(0).optional(),
-});
+export const syncSchema = z
+  .object({
+    fillValues: z.boolean().optional(),
+    refreshCosts: z.boolean().optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+    afterId: z.number().int().min(0).optional(),
+  })
+  .refine((d) => d.fillValues || d.refreshCosts, { message: "select at least one operation" });
 
 export const createLocationSchema = z.object({
   name: z.string().trim().min(1).max(64),

@@ -519,126 +519,121 @@ export async function importInventory(rows: NormalizedRow[]): Promise<ImportResu
   });
 }
 
-// Parts eligible for distributor value enrichment: blank value, a real MPN, not a jellybean.
-const enrichWhere = () =>
-  and(eq(parts.value, ""), sql`${parts.mpn} <> ''`, sql`lower(${parts.supplier}) <> 'jellybean'`);
+// A part has a usable distributor lookup key when it has an MPN or a supplier part number.
+const hasLookupKey = sql`(${parts.mpn} <> '' OR ${parts.spn} <> '')`;
+const apiSupplier = sql`lower(${parts.supplier}) in ('digikey', 'mouser')`;
 
-/** Count of parts still missing a component value (for the enrich UI). */
-export async function enrichableCount(): Promise<number> {
-  const [row] = await getDb().select({ n: sql<number>`count(*)` }).from(parts).where(enrichWhere());
-  return Number(row?.n ?? 0);
+export interface SyncCounts {
+  values: number; // parts missing a value that a lookup could fill
+  costs: number; // DigiKey/Mouser parts whose unit cost could be refreshed
 }
 
-export interface EnrichBatchResult {
+/** Counts for the distributor-sync panel (how many parts each operation would touch). */
+export async function syncCounts(): Promise<SyncCounts> {
+  const db = getDb();
+  const [v] = await db
+    .select({ n: sql<number>`count(*)` })
+    .from(parts)
+    .where(and(eq(parts.value, ""), sql`lower(${parts.supplier}) <> 'jellybean'`, hasLookupKey));
+  const [c] = await db
+    .select({ n: sql<number>`count(*)` })
+    .from(parts)
+    .where(and(apiSupplier, hasLookupKey));
+  return { values: Number(v?.n ?? 0), costs: Number(c?.n ?? 0) };
+}
+
+export interface SyncBatchResult {
   processed: number;
   updated: number;
-  nextAfterId: number | null; // pass back as `afterId` for the next batch; null = sweep complete
+  nextAfterId: number | null; // pass back as `afterId`; null = sweep complete
 }
 
 /**
- * One resumable batch of distributor enrichment. Sweeps parts by ascending id
- * (so value-less parts like ICs aren't retried endlessly), filling blank value
- * /category/package from DigiKey/Mouser. Sequential with a delay between parts to
- * respect rate limits; lookupPart caches. Drive it with a loop, passing the
- * returned nextAfterId until it comes back null.
+ * One resumable batch of distributor sync, combining two opt-in operations behind
+ * a single lookup per part:
+ *  - `fillValues`: fill a blank component value (plus blank category/package) for
+ *    non-jellybean parts.
+ *  - `refreshCosts`: overwrite unit cost (USD) for DigiKey/Mouser parts.
+ * The lookup key prefers the supplier part number for DigiKey/Mouser (a precise
+ * match), else the MPN — so a part with only an SPN can still be enriched. Sweeps
+ * by ascending id and throttles between parts to respect rate limits; cost is only
+ * overwritten when a USD price is found, so a failed lookup never wipes data.
  */
-export async function enrichValues(
-  opts: { limit?: number; delayMs?: number; afterId?: number } = {},
-): Promise<EnrichBatchResult> {
+export async function syncFromDistributors(
+  opts: {
+    fillValues?: boolean;
+    refreshCosts?: boolean;
+    limit?: number;
+    delayMs?: number;
+    afterId?: number;
+  } = {},
+): Promise<SyncBatchResult> {
+  const fillValues = !!opts.fillValues;
+  const refreshCosts = !!opts.refreshCosts;
   const limit = Math.min(Math.max(opts.limit ?? 25, 1), 200);
   const delayMs = opts.delayMs ?? 300;
   const afterId = opts.afterId ?? 0;
-  const db = getDb();
+  if (!fillValues && !refreshCosts) return { processed: 0, updated: 0, nextAfterId: null };
 
+  const clauses = [];
+  if (fillValues) {
+    clauses.push(and(eq(parts.value, ""), sql`lower(${parts.supplier}) <> 'jellybean'`, hasLookupKey));
+  }
+  if (refreshCosts) clauses.push(and(apiSupplier, hasLookupKey));
+  const eligible = clauses.length === 1 ? clauses[0] : or(...clauses);
+
+  const db = getDb();
   const targets = await db
     .select({
       id: parts.id,
       mpn: parts.mpn,
+      spn: parts.spn,
+      supplier: parts.supplier,
+      value: parts.value,
       description: parts.description,
       category: parts.category,
       package: parts.package,
     })
     .from(parts)
-    .where(and(enrichWhere(), sql`${parts.id} > ${afterId}`))
+    .where(and(eligible, sql`${parts.id} > ${afterId}`))
     .orderBy(parts.id)
     .limit(limit);
 
   let updated = 0;
   for (let i = 0; i < targets.length; i++) {
     const t = targets[i];
+    const supplier = t.supplier.toLowerCase();
+    const isApi = supplier === "digikey" || supplier === "mouser";
+    const key = isApi && t.spn ? t.spn : t.mpn || t.spn; // SPN is the precise key for DigiKey/Mouser
+    if (!key) continue;
+
     let offers;
     try {
-      ({ offers } = await lookupPart(t.mpn));
+      ({ offers } = await lookupPart(key));
     } catch {
-      continue; // transient distributor error — leave it for a later sweep
+      continue; // transient error — a later sweep retries
     }
+
     const patch: Partial<typeof parts.$inferInsert> = {};
-    const value = deriveValue(offers, t.description);
-    if (value) patch.value = value;
-    if (!t.category) {
-      const c = deriveField(offers, "category");
-      if (c) patch.category = c;
+    if (fillValues && t.value === "" && supplier !== "jellybean") {
+      const value = deriveValue(offers, t.description);
+      if (value) patch.value = value;
+      if (!t.category) {
+        const c = deriveField(offers, "category");
+        if (c) patch.category = c;
+      }
+      if (!t.package) {
+        const p = deriveField(offers, "package");
+        if (p) patch.package = p;
+      }
     }
-    if (!t.package) {
-      const p = deriveField(offers, "package");
-      if (p) patch.package = p;
+    if (refreshCosts && isApi) {
+      const offer = offers.find((o) => !o.mock && o.distributor === supplier);
+      const cost = offer ? unitCostFromOffer(offer) : null;
+      if (cost !== null) patch.unitCost = money(cost);
     }
     if (Object.keys(patch).length > 0) {
       await db.update(parts).set({ ...patch, updatedAt: sql`now()` }).where(eq(parts.id, t.id));
-      updated++;
-    }
-    if (i < targets.length - 1) await sleep(delayMs);
-  }
-
-  return { processed: targets.length, updated, nextAfterId: targets.at(-1)?.id ?? null };
-}
-
-// Parts whose cost can be refreshed from a distributor API: DigiKey/Mouser with a real MPN.
-// (LCSC has no public API and unidentified-supplier parts are left untouched.)
-const refreshWhere = () =>
-  and(sql`lower(${parts.supplier}) in ('digikey', 'mouser')`, sql`${parts.mpn} <> ''`);
-
-/** Count of DigiKey/Mouser parts whose unit cost can be refreshed. */
-export async function refreshableCostCount(): Promise<number> {
-  const [row] = await getDb().select({ n: sql<number>`count(*)` }).from(parts).where(refreshWhere());
-  return Number(row?.n ?? 0);
-}
-
-/**
- * One resumable batch that refreshes unit cost (USD) from the part's own
- * distributor (DigiKey or Mouser) using current price breaks. Sweeps by ascending
- * id; only overwrites cost when a USD price is found, so a failed/empty lookup
- * never wipes an existing cost. Throttled between lookups.
- */
-export async function refreshCosts(
-  opts: { limit?: number; delayMs?: number; afterId?: number } = {},
-): Promise<EnrichBatchResult> {
-  const limit = Math.min(Math.max(opts.limit ?? 25, 1), 200);
-  const delayMs = opts.delayMs ?? 300;
-  const afterId = opts.afterId ?? 0;
-  const db = getDb();
-
-  const targets = await db
-    .select({ id: parts.id, mpn: parts.mpn, supplier: parts.supplier })
-    .from(parts)
-    .where(and(refreshWhere(), sql`${parts.id} > ${afterId}`))
-    .orderBy(parts.id)
-    .limit(limit);
-
-  let updated = 0;
-  for (let i = 0; i < targets.length; i++) {
-    const t = targets[i];
-    let offers;
-    try {
-      ({ offers } = await lookupPart(t.mpn));
-    } catch {
-      continue;
-    }
-    const want = t.supplier.toLowerCase(); // "digikey" | "mouser"
-    const offer = offers.find((o) => !o.mock && o.distributor === want);
-    const cost = offer ? unitCostFromOffer(offer) : null;
-    if (cost !== null) {
-      await db.update(parts).set({ unitCost: money(cost), updatedAt: sql`now()` }).where(eq(parts.id, t.id));
       updated++;
     }
     if (i < targets.length - 1) await sleep(delayMs);
