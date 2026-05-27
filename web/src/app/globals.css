@@ -3,6 +3,8 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  /* Render native controls (select dropdowns, scrollbars) to match the theme. */
+  color-scheme: light dark;
 }
 
 @theme inline {

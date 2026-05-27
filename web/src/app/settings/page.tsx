@@ -127,6 +127,8 @@ interface SyncStatus {
 interface SyncBatch {
   processed: number;
   updated: number;
+  live: number;
+  errors: number;
   nextAfterId: number | null;
 }
 
@@ -138,6 +140,8 @@ function SyncPanel() {
   const [running, setRunning] = useState(false);
   const [swept, setSwept] = useState(0);
   const [updated, setUpdated] = useState(0);
+  const [live, setLive] = useState(0);
+  const [errors, setErrors] = useState(0);
   const [done, setDone] = useState(false);
   const [msg, setMsg] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
@@ -163,9 +167,13 @@ function SyncPanel() {
     setDone(false);
     setSwept(0);
     setUpdated(0);
+    setLive(0);
+    setErrors(0);
     let afterId = 0;
     let sweptTotal = 0;
     let updatedTotal = 0;
+    let liveTotal = 0;
+    let errorsTotal = 0;
     try {
       for (;;) {
         const res = await jpost<SyncBatch>("/api/parts/sync", {
@@ -176,8 +184,12 @@ function SyncPanel() {
         });
         sweptTotal += res.processed;
         updatedTotal += res.updated;
+        liveTotal += res.live;
+        errorsTotal += res.errors;
         setSwept(sweptTotal);
         setUpdated(updatedTotal);
+        setLive(liveTotal);
+        setErrors(errorsTotal);
         if (res.nextAfterId === null) break;
         afterId = res.nextAfterId;
         await new Promise((r) => setTimeout(r, 300)); // gentle pause between batches
@@ -241,15 +253,23 @@ function SyncPanel() {
             </button>
             {running && (
               <span className="text-black/60 dark:text-white/60">
-                Swept {swept}… updated {updated}.
+                Swept {swept}… updated {updated} (live data for {live}).
               </span>
             )}
             {done && !running && (
               <span className="text-green-700 dark:text-green-400">
-                Done — swept {swept}, updated {updated}.
+                Done — swept {swept}, updated {updated}, live data for {live}
+                {errors ? `, ${errors} lookup errors` : ""}.
               </span>
             )}
           </div>
+          {done && !running && live === 0 && (
+            <p className="mt-2 rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+              No live distributor data came back for any part — so only values derivable from existing
+              descriptions could be filled. Check that the server has valid DigiKey/Mouser keys and{" "}
+              <code>DIGIKEY_USE_SANDBOX=false</code> (sandbox returns no real matches), then retry.
+            </p>
+          )}
         </div>
       )}
       {msg && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{msg}</p>}

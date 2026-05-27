@@ -251,10 +251,10 @@ export default function Home() {
 }
 
 /**
- * Horizontally scrollable container a plain mouse can drive: a vertical mouse
- * wheel scrolls it sideways (at the horizontal edges the wheel falls back to
- * scrolling the page). Shift+wheel, trackpad swipes, and the native scrollbar
- * all still work, and — unlike drag-to-scroll — text stays selectable. Fade
+ * Horizontally scrollable container. A plain mouse wheel scrolls the page as
+ * usual; holding Alt while scrolling moves the table sideways (a deliberate
+ * gesture, so reading the page never gets hijacked). Shift+wheel, trackpad
+ * swipes, and the native scrollbar also work, and text stays selectable. Fade
  * shadows mark hidden content.
  */
 function HScroll({
@@ -284,16 +284,15 @@ function HScroll({
     ro.observe(el);
     if (el.firstElementChild) ro.observe(el.firstElementChild);
 
-    // Translate a vertical mouse wheel into horizontal scrolling. Needs a
-    // non-passive listener so preventDefault works (React's onWheel is passive).
+    // Alt+wheel scrolls the table sideways. A plain wheel is left alone so the
+    // page scrolls normally. Needs a non-passive listener so preventDefault
+    // works (React's onWheel is passive).
     function onWheel(e: WheelEvent) {
-      if (e.shiftKey) return; // shift+wheel already scrolls horizontally
+      if (!e.altKey) return; // only the explicit Alt gesture scrolls horizontally
       if (el!.scrollWidth <= el!.clientWidth) return; // nothing hidden sideways
-      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return; // honor trackpad horizontal intent
-      const atStart = el!.scrollLeft <= 0;
-      const atEnd = el!.scrollLeft + el!.clientWidth >= el!.scrollWidth - 1;
-      if ((e.deltaY < 0 && atStart) || (e.deltaY > 0 && atEnd)) return; // let the page scroll at edges
-      el!.scrollLeft += e.deltaY;
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (delta === 0) return;
+      el!.scrollLeft += delta;
       e.preventDefault();
     }
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -368,7 +367,7 @@ function InventoryTable({ rows, onEdit }: { rows: CatalogRow[]; onEdit: (r: Cata
       </HScroll>
       {scrollable && (
         <p className="mt-1.5 text-xs text-black/45 dark:text-white/45">
-          ↔ Scroll with your mouse wheel (or hold Shift) to see all columns.
+          ↔ Hold Alt and scroll (or Shift+scroll) to see all columns.
         </p>
       )}
     </>

@@ -558,6 +558,8 @@ export async function syncCounts(): Promise<SyncCounts> {
 export interface SyncBatchResult {
   processed: number;
   updated: number;
+  live: number; // parts for which a live (non-mock) distributor offer was returned
+  errors: number; // parts whose lookup threw
   nextAfterId: number | null; // pass back as `afterId`; null = sweep complete
 }
 
@@ -588,7 +590,9 @@ export async function syncFromDistributors(
   const limit = Math.min(Math.max(opts.limit ?? 25, 1), 200);
   const delayMs = opts.delayMs ?? 300;
   const afterId = opts.afterId ?? 0;
-  if (!fillValues && !refreshCosts) return { processed: 0, updated: 0, nextAfterId: null };
+  if (!fillValues && !refreshCosts) {
+    return { processed: 0, updated: 0, live: 0, errors: 0, nextAfterId: null };
+  }
 
   const clauses = [];
   if (fillValues) clauses.push(fillEligible);
@@ -614,6 +618,8 @@ export async function syncFromDistributors(
     .limit(limit);
 
   let updated = 0;
+  let liveCount = 0;
+  let errorCount = 0;
   for (let i = 0; i < targets.length; i++) {
     const t = targets[i];
     const supplier = t.supplier.toLowerCase();
@@ -625,12 +631,14 @@ export async function syncFromDistributors(
     try {
       ({ offers } = await lookupPart(key));
     } catch (e) {
+      errorCount++;
       console.warn(`[sync] part ${t.id} (${key}): lookup failed —`, e instanceof Error ? e.message : e);
       continue; // transient error — a later sweep retries
     }
 
     const live = offers.filter((o) => !o.mock);
-    if (live.length === 0 && isApi) {
+    if (live.length > 0) liveCount++;
+    else if (isApi) {
       console.warn(
         `[sync] part ${t.id} (${key}): DigiKey/Mouser returned no live data (mock only) — check API keys / DIGIKEY_USE_SANDBOX=false`,
       );
@@ -693,5 +701,11 @@ export async function syncFromDistributors(
     if (i < targets.length - 1) await sleep(delayMs);
   }
 
-  return { processed: targets.length, updated, nextAfterId: targets.at(-1)?.id ?? null };
+  return {
+    processed: targets.length,
+    updated,
+    live: liveCount,
+    errors: errorCount,
+    nextAfterId: targets.at(-1)?.id ?? null,
+  };
 }
