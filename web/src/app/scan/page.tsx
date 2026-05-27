@@ -5,7 +5,7 @@ import type { ReaderOptions } from "zxing-wasm/reader";
 
 import { Nav } from "@/components/Nav";
 import { jget, jpost } from "@/lib/client";
-import { decodeScannedBytes, parseLabel } from "@/lib/domain/barcode";
+import { EOT, GS, RS, decodeScannedBytes, parseLabel } from "@/lib/domain/barcode";
 
 interface Location {
   id: number;
@@ -55,6 +55,16 @@ const SUPPLIER_LABEL: Record<string, string> = {
   mouser: "Mouser",
   lcsc: "LCSC",
 };
+
+/**
+ * A real MPN is printable ASCII with no spaces. LCSC's "pm" is often a product
+ * name (Chinese text, spaces) rather than an MPN, so those route to Name and
+ * the C-code becomes the identifier instead.
+ */
+function looksLikeMpn(s: string): boolean {
+  const t = s.trim();
+  return t.length > 0 && !/\s/.test(t) && !/[^\x20-\x7e]/.test(t);
+}
 
 const inputClass =
   "w-full rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20";
@@ -147,10 +157,19 @@ export default function ScanPage() {
     setRawText(raw);
     try {
       const label = parseLabel(raw);
-      setMpn(label.mpn ?? label.distributorPart ?? "");
       setSpn(label.distributorPart ?? "");
       setSupplier(SUPPLIER_LABEL[label.distributor] ?? "");
       setQty(label.quantity != null ? String(label.quantity) : "");
+      // LCSC's "pm" is often a product name (Chinese text, spaces), not a real
+      // MPN: route it to Name and use the C-code as the identifier. A clean
+      // alphanumeric pm is kept as the MPN.
+      const pm = label.mpn ?? "";
+      if (label.distributor === "lcsc" && pm && !looksLikeMpn(pm)) {
+        setName(pm);
+        setMpn(label.distributorPart ?? "");
+      } else {
+        setMpn(pm || (label.distributorPart ?? ""));
+      }
       setScanInfo(
         `${label.distributor} · ${label.mpn ?? label.distributorPart ?? "?"}` +
           (label.quantity != null ? ` · qty ${label.quantity}` : ""),
@@ -525,7 +544,7 @@ export default function ScanPage() {
           )}
           {rawText && (
             <p className="select-all break-all rounded bg-black/5 px-2 py-1 font-mono text-[10px] text-black/50 dark:bg-white/5 dark:text-white/50">
-              {rawText}
+              {rawText.split(GS).join("[GS]").split(RS).join("[RS]").split(EOT).join("[EOT]")}
             </p>
           )}
           <input
