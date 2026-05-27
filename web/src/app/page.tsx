@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Nav } from "@/components/Nav";
 import { Modal, btn, inputClass } from "@/components/ui";
 import { jget, jpatch, jpost } from "@/lib/client";
+import { useAltWheelScroll } from "@/lib/useAltWheelScroll";
 
 interface CatalogRow {
   id: number;
@@ -56,6 +57,10 @@ type Filters = {
   package: string;
   location: string;
 };
+
+// Render the catalog in chunks — a small DOM keeps row expansion snappy on
+// large result sets; "Show more" reveals the next chunk.
+const ROWS_PER_PAGE = 50;
 
 const EMPTY: Filters = {
   q: "",
@@ -132,6 +137,22 @@ export default function Home() {
 
   const refresh = () => setRefreshKey((k) => k + 1);
 
+  // Reflect a single inline cell edit locally so the row updates without a
+  // refetch (keeps scroll position and any expanded rows intact).
+  const patchRow = useCallback((id: number, patch: Partial<CatalogRow>) => {
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.id !== id) return r;
+        const next = { ...r, ...patch };
+        if (patch.unitCost !== undefined) {
+          next.stockValue =
+            patch.unitCost === null ? null : Number((patch.unitCost * next.totalQuantity).toFixed(4));
+        }
+        return next;
+      }),
+    );
+  }, []);
+
   return (
     <>
       <Nav />
@@ -193,7 +214,7 @@ export default function Home() {
               </p>
             )}
 
-            <InventoryTable rows={rows} onEdit={setEditing} />
+            <InventoryTable rows={rows} onEdit={setEditing} onPatched={patchRow} />
             {rows.length >= 500 && (
               <p className="mt-2 text-xs text-black/50 dark:text-white/50">
                 Showing first 500 — refine the search.
@@ -250,11 +271,34 @@ export default function Home() {
   );
 }
 
-function InventoryTable({ rows, onEdit }: { rows: CatalogRow[]; onEdit: (r: CatalogRow) => void }) {
+function InventoryTable({
+  rows,
+  onEdit,
+  onPatched,
+}: {
+  rows: CatalogRow[];
+  onEdit: (r: CatalogRow) => void;
+  onPatched: (id: number, patch: Partial<CatalogRow>) => void;
+}) {
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [visible, setVisible] = useState(ROWS_PER_PAGE);
+  // Render rows incrementally — keeping the DOM small is what makes expand snappy
+  // on large result sets. Reset paging/expansion when a new result set arrives
+  // (set-state-during-render is React's recommended way to react to a prop change).
+  const [prevRows, setPrevRows] = useState(rows);
+  if (rows !== prevRows) {
+    setPrevRows(rows);
+    setVisible(ROWS_PER_PAGE);
+    setExpanded(null);
+  }
+  // Stable handler so memoized rows don't re-render when an unrelated row toggles.
+  const toggle = useCallback((id: number) => setExpanded((cur) => (cur === id ? null : id)), []);
+  const scrollRef = useAltWheelScroll<HTMLDivElement>();
   const cols = 12;
+  const shown = rows.slice(0, visible);
   return (
-    <div className="overflow-x-auto rounded-xl border border-black/10 dark:border-white/15">
+    <>
+      <div ref={scrollRef} className="overflow-x-auto rounded-xl border border-black/10 dark:border-white/15">
       <table className="w-full min-w-[72rem] text-left text-sm">
         <thead className="text-black/50 dark:text-white/50">
           <tr className="border-b border-black/10 dark:border-white/15">
@@ -281,34 +325,58 @@ function InventoryTable({ rows, onEdit }: { rows: CatalogRow[]; onEdit: (r: Cata
               </td>
             </tr>
           ) : (
-            rows.map((r) => (
+            shown.map((r) => (
               <PartRow
                 key={r.id}
                 row={r}
                 expanded={expanded === r.id}
-                onToggle={() => setExpanded((id) => (id === r.id ? null : r.id))}
-                onEdit={() => onEdit(r)}
+                onToggle={toggle}
+                onEdit={onEdit}
+                onPatched={onPatched}
                 colSpan={cols + 1}
               />
             ))
           )}
         </tbody>
       </table>
-    </div>
+      </div>
+
+      {visible < rows.length && (
+        <div className="mt-3 flex items-center justify-center gap-3 text-sm">
+          <span className="text-black/50 dark:text-white/50">
+            Showing {shown.length} of {rows.length}
+          </span>
+          <button
+            className="rounded-md border border-black/15 px-3 py-1.5 font-medium hover:bg-black/5 dark:border-white/20 dark:hover:bg-white/10"
+            onClick={() => setVisible((v) => v + ROWS_PER_PAGE)}
+          >
+            Show more
+          </button>
+          <button
+            className="rounded-md px-3 py-1.5 text-black/60 hover:bg-black/5 dark:text-white/60 dark:hover:bg-white/10"
+            onClick={() => setVisible(rows.length)}
+          >
+            Show all
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 
-function PartRow({
+const PartRow = memo(function PartRow({
   row,
   expanded,
   onToggle,
   onEdit,
+  onPatched,
   colSpan,
 }: {
   row: CatalogRow;
   expanded: boolean;
-  onToggle: () => void;
-  onEdit: () => void;
+  onToggle: (id: number) => void;
+  onEdit: (row: CatalogRow) => void;
+  onPatched: (id: number, patch: Partial<CatalogRow>) => void;
   colSpan: number;
 }) {
   return (
@@ -317,22 +385,53 @@ function PartRow({
         <td className="px-2 py-2">
           <button
             className="grid h-5 w-5 place-items-center rounded text-black/50 hover:bg-black/5 dark:text-white/50 dark:hover:bg-white/10"
-            onClick={onToggle}
+            onClick={() => onToggle(row.id)}
             aria-label={expanded ? "Collapse" : "Expand locations"}
           >
             <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>▸</span>
           </button>
         </td>
-        <td className="px-3 py-2">{row.category || "—"}</td>
-        <td className="px-3 py-2 text-black/70 dark:text-white/70">{row.supplier || "—"}</td>
-        <td className="px-3 py-2 font-mono text-xs">{row.spn || "—"}</td>
-        <td className="px-3 py-2 text-black/70 dark:text-white/70">{row.manufacturer || "—"}</td>
-        <td className="px-3 py-2 font-mono">{row.mpn || "—"}</td>
-        <td className="max-w-xs truncate px-3 py-2 text-black/70 dark:text-white/70" title={row.description}>
-          {row.description || "—"}
-        </td>
-        <td className="px-3 py-2">{row.value || "—"}</td>
-        <td className="px-3 py-2 text-right tabular-nums">{money(row.unitCost)}</td>
+        <EditableCell partId={row.id} field="category" raw={row.category} className="px-3 py-2" onPatched={onPatched} />
+        <EditableCell
+          partId={row.id}
+          field="supplier"
+          raw={row.supplier}
+          className="px-3 py-2 text-black/70 dark:text-white/70"
+          onPatched={onPatched}
+        />
+        <EditableCell
+          partId={row.id}
+          field="spn"
+          raw={row.spn}
+          className="px-3 py-2 font-mono text-xs"
+          onPatched={onPatched}
+        />
+        <EditableCell
+          partId={row.id}
+          field="manufacturer"
+          raw={row.manufacturer}
+          className="px-3 py-2 text-black/70 dark:text-white/70"
+          onPatched={onPatched}
+        />
+        <EditableCell partId={row.id} field="mpn" raw={row.mpn} className="px-3 py-2 font-mono" onPatched={onPatched} />
+        <EditableCell
+          partId={row.id}
+          field="description"
+          raw={row.description}
+          title={row.description || undefined}
+          className="max-w-xs truncate px-3 py-2 text-black/70 dark:text-white/70"
+          onPatched={onPatched}
+        />
+        <EditableCell partId={row.id} field="value" raw={row.value} className="px-3 py-2" onPatched={onPatched} />
+        <EditableCell
+          partId={row.id}
+          field="unitCost"
+          numeric
+          raw={row.unitCost != null ? String(row.unitCost) : ""}
+          display={money(row.unitCost)}
+          className="px-3 py-2 text-right tabular-nums"
+          onPatched={onPatched}
+        />
         <td className="px-3 py-2 text-right tabular-nums">{row.numLocations}</td>
         <td className="px-3 py-2 text-right">
           {row.totalQuantity > 0 ? (
@@ -347,7 +446,7 @@ function PartRow({
         <td className="px-3 py-2 text-right">
           <button
             className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-blue-500/10 dark:text-blue-400"
-            onClick={onEdit}
+            onClick={() => onEdit(row)}
             aria-label={`Edit ${row.mpn || row.description}`}
           >
             ✎ Edit
@@ -364,10 +463,142 @@ function PartRow({
       )}
     </>
   );
+});
+
+type EditableField =
+  | "category"
+  | "supplier"
+  | "spn"
+  | "manufacturer"
+  | "mpn"
+  | "description"
+  | "value"
+  | "unitCost";
+
+/**
+ * A catalog cell that turns into an inline editor on Ctrl/Cmd+click (desktop
+ * only — touch has no modifier-click). Enter commits a single-field PATCH; Esc
+ * or blur cancels. On success the parent updates its row locally (no refetch).
+ */
+function EditableCell({
+  partId,
+  field,
+  raw,
+  display,
+  numeric,
+  className,
+  title,
+  onPatched,
+}: {
+  partId: number;
+  field: EditableField;
+  raw: string;
+  display?: ReactNode;
+  numeric?: boolean;
+  className?: string;
+  title?: string;
+  onPatched: (id: number, patch: Partial<CatalogRow>) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(raw);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const el = inputRef.current;
+    if (editing && el) {
+      el.focus();
+      el.select();
+    }
+  }, [editing]);
+
+  function begin(e: React.MouseEvent) {
+    if (!(e.ctrlKey || e.metaKey)) return; // modifier-click only; ignores plain clicks and touch
+    e.preventDefault();
+    setDraft(raw);
+    setErr(false);
+    setEditing(true);
+  }
+
+  function cancel() {
+    setEditing(false);
+    setDraft(raw);
+    setErr(false);
+  }
+
+  async function commit() {
+    const trimmed = draft.trim();
+    let value: string | number | null = trimmed;
+    if (numeric) {
+      if (trimmed === "") value = null;
+      else {
+        const n = Number(trimmed);
+        if (!Number.isFinite(n) || n < 0) {
+          setErr(true);
+          return;
+        }
+        value = n;
+      }
+    }
+    setSaving(true);
+    setErr(false);
+    try {
+      await jpatch(`/api/parts/${partId}`, { [field]: value });
+      onPatched(partId, { [field]: value } as Partial<CatalogRow>);
+      setEditing(false);
+    } catch {
+      setErr(true);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <td className={className}>
+        <input
+          ref={inputRef}
+          value={draft}
+          readOnly={saving}
+          inputMode={numeric ? "decimal" : undefined}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={cancel}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            }
+          }}
+          className={`w-full rounded bg-white px-1 py-0.5 text-sm text-black outline-none ring-1 dark:bg-neutral-900 dark:text-white ${
+            err ? "ring-red-500" : "ring-blue-500"
+          }`}
+        />
+      </td>
+    );
+  }
+
+  return (
+    <td
+      className={`${className ?? ""} cursor-cell hover:bg-blue-500/5`}
+      onClick={begin}
+      title={title ?? "Ctrl+클릭으로 편집"}
+    >
+      {display ?? (raw || "—")}
+    </td>
+  );
 }
 
+// Stock detail cached per part so re-expanding a row is instant (no refetch, no
+// "Loading…" flash). Confirming a count invalidates the part's entry.
+const stockCache = new Map<number, StockRow[]>();
+
 function LocationDetail({ partId }: { partId: number }) {
-  const [stock, setStock] = useState<StockRow[] | null>(null);
+  // Seed from cache so a re-expand paints immediately; still revalidate below.
+  const [stock, setStock] = useState<StockRow[] | null>(() => stockCache.get(partId) ?? null);
   const [busy, setBusy] = useState<number | null>(null);
   const [reload, setReload] = useState(0);
 
@@ -376,9 +607,10 @@ function LocationDetail({ partId }: { partId: number }) {
     void (async () => {
       try {
         const data = await jget<StockRow[]>(`/api/parts/${partId}/stock`);
+        stockCache.set(partId, data);
         if (active) setStock(data);
       } catch {
-        if (active) setStock([]);
+        if (active && !stockCache.has(partId)) setStock([]);
       }
     })();
     return () => {
@@ -390,6 +622,7 @@ function LocationDetail({ partId }: { partId: number }) {
     setBusy(locationId);
     try {
       await jpost(`/api/parts/${partId}/confirm`, { locationId });
+      stockCache.delete(partId); // dates changed — force a fresh read
       setReload((n) => n + 1);
     } finally {
       setBusy(null);
