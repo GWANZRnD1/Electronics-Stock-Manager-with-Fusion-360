@@ -29,6 +29,11 @@ export const confirmStockSchema = z.object({
   locationId: z.number().int().positive(),
 });
 
+export const adjustStockSchema = z.object({
+  locationId: z.number().int().positive(),
+  quantity: z.number().int().min(0).max(1_000_000),
+});
+
 export const purgeSchema = z.object({
   confirm: z.literal("PURGE"),
 });

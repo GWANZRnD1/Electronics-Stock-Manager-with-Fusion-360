@@ -206,7 +206,7 @@ export default function LibraryPage() {
   }
 
   function discardDrafts() {
-    if (!window.confirm("저장된 모든 임시 편집본을 삭제할까요?")) return;
+    if (!window.confirm("Discard all saved drafts?")) return;
     clearAllDrafts();
     setResumable([]);
     setFileDraft(null);
@@ -377,10 +377,10 @@ export default function LibraryPage() {
 
               <span className="ml-auto text-xs text-black/50 dark:text-white/50">
                 {quotaError
-                  ? "⚠ 용량 초과 — 자동 임시저장 꺼짐"
+                  ? "⚠ Storage full — autosave off"
                   : lastSavedAt
-                    ? `임시저장됨 · ${new Date(lastSavedAt).toLocaleTimeString()}`
-                    : "자동 임시저장 (3분마다)"}
+                    ? `Draft saved · ${new Date(lastSavedAt).toLocaleTimeString()}`
+                    : "Autosaves every 3 min"}
               </span>
 
               <button
@@ -397,13 +397,13 @@ export default function LibraryPage() {
         {!baseline && resumable.length > 0 && (
           <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-400/10 p-4">
             <div className="mb-2 flex items-center justify-between gap-3">
-              <p className="text-sm font-medium">이어서 편집할 임시저장본이 있어요</p>
+              <p className="text-sm font-medium">You have unsaved drafts to resume</p>
               <button
                 type="button"
                 onClick={discardDrafts}
                 className="rounded-md px-2 py-1 text-xs text-black/50 hover:bg-black/10 hover:text-black dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white"
               >
-                모두 삭제
+                Discard all
               </button>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -424,21 +424,21 @@ export default function LibraryPage() {
         {fileDraft && (
           <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-400/10 px-4 py-3 text-sm">
             <span>
-              이 파일의 임시저장본이 있어요 ({savedAt(fileDraft.updatedAt)}, {fileDraft.rowCount} rows).
+              This file has an unsaved draft ({savedAt(fileDraft.updatedAt)}, {fileDraft.rowCount} rows).
             </span>
             <button
               type="button"
               onClick={() => restoreDraft(fileDraft.fileName)}
               className="rounded-md bg-amber-600 px-3 py-1 font-medium text-white hover:bg-amber-500"
             >
-              복원
+              Restore
             </button>
             <button
               type="button"
               onClick={() => setFileDraft(null)}
               className="rounded-md border border-black/20 px-3 py-1 hover:bg-black/5 dark:border-white/25 dark:hover:bg-white/10"
             >
-              무시
+              Ignore
             </button>
           </div>
         )}

@@ -333,7 +333,9 @@ export async function searchCatalog(f: CatalogFilters = {}) {
     .where(where)
     .groupBy(parts.id)
     .orderBy(categoryKeySql(parts.category), parts.mpn)
-    .limit(f.limit ?? 500);
+    // The client renders incrementally (Show more), so fetch a generous cap and
+    // let the UI page through it — the "of N" count then reflects the true total.
+    .limit(f.limit ?? 5000);
 
   // Bundle spelling variants so every row of one category shows the same label.
   const counts = new Map<string, number>();
@@ -366,6 +368,36 @@ export async function getPartStock(partId: number) {
     .innerJoin(locations, eq(locations.id, stockItems.locationId))
     .where(eq(stockItems.partId, partId))
     .orderBy(locations.name);
+}
+
+/**
+ * Set an existing part+location count to an absolute quantity, logging the change
+ * as an `adjust` txn so the ledger stays the source of truth. Returns null if the
+ * part has no stock row in that location. Confirms the count (touches the date).
+ */
+export async function setStockQuantity(
+  partId: number,
+  locationId: number,
+  quantity: number,
+  actor = "",
+): Promise<{ quantity: number } | null> {
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const [cur] = await tx
+      .select({ quantity: stockItems.quantity })
+      .from(stockItems)
+      .where(and(eq(stockItems.partId, partId), eq(stockItems.locationId, locationId)));
+    if (!cur) return null;
+    const delta = quantity - cur.quantity;
+    if (delta !== 0) {
+      await tx
+        .update(stockItems)
+        .set({ quantity, lastConfirmedAt: sql`now()` })
+        .where(and(eq(stockItems.partId, partId), eq(stockItems.locationId, locationId)));
+      await tx.insert(inventoryTxns).values({ partId, locationId, delta, reason: "adjust", actor });
+    }
+    return { quantity };
+  });
 }
 
 /** Mark a part+location count as physically confirmed now. Returns false if missing. */

@@ -144,9 +144,9 @@ export default function Home() {
       prev.map((r) => {
         if (r.id !== id) return r;
         const next = { ...r, ...patch };
-        if (patch.unitCost !== undefined) {
+        if (patch.unitCost !== undefined || patch.totalQuantity !== undefined) {
           next.stockValue =
-            patch.unitCost === null ? null : Number((patch.unitCost * next.totalQuantity).toFixed(4));
+            next.unitCost === null ? null : Number((next.unitCost * next.totalQuantity).toFixed(4));
         }
         return next;
       }),
@@ -215,9 +215,9 @@ export default function Home() {
             )}
 
             <InventoryTable rows={rows} onEdit={setEditing} onPatched={patchRow} />
-            {rows.length >= 500 && (
+            {rows.length >= 5000 && (
               <p className="mt-2 text-xs text-black/50 dark:text-white/50">
-                Showing first 500 — refine the search.
+                Showing first 5000 — refine the search.
               </p>
             )}
           </>
@@ -381,7 +381,7 @@ const PartRow = memo(function PartRow({
 }) {
   return (
     <>
-      <tr className="border-b border-black/5 dark:border-white/10">
+      <tr className="border-b border-black/5 dark:border-white/10" onMouseEnter={() => prefetchStock(row.id)}>
         <td className="px-2 py-2">
           <button
             className="grid h-5 w-5 place-items-center rounded text-black/50 hover:bg-black/5 dark:text-white/50 dark:hover:bg-white/10"
@@ -457,7 +457,7 @@ const PartRow = memo(function PartRow({
         <tr className="border-b border-black/5 bg-black/[0.02] dark:border-white/10 dark:bg-white/[0.03]">
           <td />
           <td className="px-3 py-2" colSpan={colSpan - 1}>
-            <LocationDetail partId={row.id} />
+            <LocationDetail partId={row.id} onPatched={onPatched} />
           </td>
         </tr>
       )}
@@ -585,7 +585,7 @@ function EditableCell({
     <td
       className={`${className ?? ""} cursor-cell hover:bg-blue-500/5`}
       onClick={begin}
-      title={title ?? "Ctrl+클릭으로 편집"}
+      title={title ?? "Ctrl+click to edit"}
     >
       {display ?? (raw || "—")}
     </td>
@@ -593,26 +593,60 @@ function EditableCell({
 }
 
 // Stock detail cached per part so re-expanding a row is instant (no refetch, no
-// "Loading…" flash). Confirming a count invalidates the part's entry.
+// "Loading…" flash). Hovering a row prefetches it so the first open feels instant
+// too. An in-flight map dedupes concurrent requests for the same part.
 const stockCache = new Map<number, StockRow[]>();
+const stockInflight = new Map<number, Promise<StockRow[]>>();
 
-function LocationDetail({ partId }: { partId: number }) {
+function fetchStock(partId: number): Promise<StockRow[]> {
+  const cached = stockCache.get(partId);
+  if (cached) return Promise.resolve(cached);
+  const inflight = stockInflight.get(partId);
+  if (inflight) return inflight;
+  const p = jget<StockRow[]>(`/api/parts/${partId}/stock`)
+    .then((data) => {
+      stockCache.set(partId, data);
+      stockInflight.delete(partId);
+      return data;
+    })
+    .catch((e) => {
+      stockInflight.delete(partId);
+      throw e;
+    });
+  stockInflight.set(partId, p);
+  return p;
+}
+
+/** Warm the cache ahead of a click (called on row hover) so expand feels instant. */
+function prefetchStock(partId: number): void {
+  void fetchStock(partId).catch(() => {});
+}
+
+function LocationDetail({
+  partId,
+  onPatched,
+}: {
+  partId: number;
+  onPatched: (id: number, patch: Partial<CatalogRow>) => void;
+}) {
   // Seed from cache so a re-expand paints immediately; still revalidate below.
   const [stock, setStock] = useState<StockRow[] | null>(() => stockCache.get(partId) ?? null);
   const [busy, setBusy] = useState<number | null>(null);
   const [reload, setReload] = useState(0);
+  const [editLoc, setEditLoc] = useState<number | null>(null);
+  const [draft, setDraft] = useState("");
+  const [savingQty, setSavingQty] = useState(false);
+  const [qtyErr, setQtyErr] = useState(false);
 
   useEffect(() => {
     let active = true;
-    void (async () => {
-      try {
-        const data = await jget<StockRow[]>(`/api/parts/${partId}/stock`);
-        stockCache.set(partId, data);
+    fetchStock(partId)
+      .then((data) => {
         if (active) setStock(data);
-      } catch {
+      })
+      .catch(() => {
         if (active && !stockCache.has(partId)) setStock([]);
-      }
-    })();
+      });
     return () => {
       active = false;
     };
@@ -626,6 +660,40 @@ function LocationDetail({ partId }: { partId: number }) {
       setReload((n) => n + 1);
     } finally {
       setBusy(null);
+    }
+  }
+
+  function beginQty(e: React.MouseEvent, s: StockRow) {
+    if (!(e.ctrlKey || e.metaKey)) return; // modifier-click only
+    e.preventDefault();
+    setEditLoc(s.locationId);
+    setDraft(String(s.quantity));
+    setQtyErr(false);
+  }
+
+  async function commitQty(s: StockRow) {
+    const n = Number(draft.trim());
+    if (!Number.isInteger(n) || n < 0) {
+      setQtyErr(true);
+      return;
+    }
+    setSavingQty(true);
+    setQtyErr(false);
+    try {
+      await jpatch(`/api/parts/${partId}/stock`, { locationId: s.locationId, quantity: n });
+      const next = (stock ?? []).map((x) => (x.locationId === s.locationId ? { ...x, quantity: n } : x));
+      stockCache.set(partId, next);
+      setStock(next);
+      // Keep the catalog row's derived totals in sync without a refetch.
+      onPatched(partId, {
+        totalQuantity: next.reduce((a, x) => a + x.quantity, 0),
+        numLocations: next.filter((x) => x.quantity > 0).length,
+      });
+      setEditLoc(null);
+    } catch {
+      setQtyErr(true);
+    } finally {
+      setSavingQty(false);
     }
   }
 
@@ -646,7 +714,39 @@ function LocationDetail({ partId }: { partId: number }) {
         {stock.map((s) => (
           <tr key={s.locationId}>
             <td className="py-1 pr-4">{s.location}</td>
-            <td className="py-1 pr-4 text-right tabular-nums">{s.quantity}</td>
+            <td className="py-1 pr-4 text-right tabular-nums">
+              {editLoc === s.locationId ? (
+                <input
+                  autoFocus
+                  value={draft}
+                  readOnly={savingQty}
+                  inputMode="numeric"
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onBlur={() => setEditLoc(null)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void commitQty(s);
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      setEditLoc(null);
+                    }
+                  }}
+                  className={`w-20 rounded bg-white px-1 py-0.5 text-right text-black outline-none ring-1 dark:bg-neutral-900 dark:text-white ${
+                    qtyErr ? "ring-red-500" : "ring-blue-500"
+                  }`}
+                />
+              ) : (
+                <span
+                  className="cursor-cell rounded px-1 hover:bg-blue-500/10"
+                  title="Ctrl+click to edit"
+                  onClick={(e) => beginQty(e, s)}
+                >
+                  {s.quantity}
+                </span>
+              )}
+            </td>
             <td className="py-1 pr-4 text-black/60 dark:text-white/60">{fmtDate(s.lastConfirmedAt)}</td>
             <td className="py-1">
               <button
