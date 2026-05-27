@@ -289,11 +289,15 @@ export default function BoardDetailPage() {
     }
     setBatchMsg("Building DigiKey list…");
     try {
-      // Matched parts carry a real MPN as their key; unmatched jellybeans (no
-      // supplier) carry a descriptor — resolve those to a real in-stock DigiKey
-      // MPN first so they actually populate the list.
-      const matched = dk.filter((s) => s.supplier).map((s) => ({ partNumber: s.partKey, quantity: s.shortage }));
-      const jelly = dk.filter((s) => !s.supplier);
+      // A real orderable MPN is a single token; a descriptor like
+      // "2.2 kOhm 0603 (1608 Metric)" has spaces and must be resolved to a real
+      // in-stock DigiKey part first — whether or not it matched a catalog part
+      // (catalog-matched resistors still carry a descriptor as their key).
+      const isDescriptor = (key: string) => /\s/.test(key.trim());
+      const direct = dk
+        .filter((s) => !isDescriptor(s.partKey))
+        .map((s) => ({ partNumber: s.partKey, quantity: s.shortage }));
+      const jelly = dk.filter((s) => isDescriptor(s.partKey));
       const resolvedItems: { partNumber: string; quantity: number }[] = [];
       let unresolved = 0;
       if (jelly.length > 0) {
@@ -307,7 +311,7 @@ export default function BoardDetailPage() {
           else unresolved += 1;
         }
       }
-      const items = [...matched, ...resolvedItems];
+      const items = [...direct, ...resolvedItems];
       if (items.length === 0) {
         setBatchMsg("Couldn't resolve any DigiKey parts to batch — use the per-part links.");
         return;

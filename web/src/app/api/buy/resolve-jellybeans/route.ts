@@ -67,14 +67,23 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "invalid request" }, { status: 400 });
   }
 
-  const resolved = await Promise.all(
-    parsed.data.items.map(async ({ descriptor, quantity }) => {
-      const hit = await resolve(descriptor);
-      return hit
+  // Sequentially (not Promise.all) so we don't trip DigiKey's burst rate limit;
+  // cache hits make repeats instant.
+  const resolved: {
+    descriptor: string;
+    quantity: number;
+    mpn: string | null;
+    manufacturer?: string;
+    unitPrice?: number;
+  }[] = [];
+  for (const { descriptor, quantity } of parsed.data.items) {
+    const hit = await resolve(descriptor);
+    resolved.push(
+      hit
         ? { descriptor, quantity, mpn: hit.mpn, manufacturer: hit.manufacturer, unitPrice: hit.unitPrice }
-        : { descriptor, quantity, mpn: null };
-    }),
-  );
+        : { descriptor, quantity, mpn: null },
+    );
+  }
 
   return NextResponse.json({ resolved });
 }

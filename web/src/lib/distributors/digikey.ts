@@ -146,16 +146,23 @@ export async function digikeySearchCandidates(
   if (!digikeyConfigured()) return [];
 
   const token = await getToken();
-  const res = await fetch(`${base()}/products/v4/search/keyword`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "X-DIGIKEY-Client-Id": process.env.DIGIKEY_CLIENT_ID ?? "",
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify({ Keywords: keywords, Limit: limit }),
-  });
+  const doSearch = () =>
+    fetch(`${base()}/products/v4/search/keyword`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "X-DIGIKEY-Client-Id": process.env.DIGIKEY_CLIENT_ID ?? "",
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({ Keywords: keywords, Limit: limit }),
+    });
+
+  let res = await doSearch();
+  if (res.status === 429) {
+    await new Promise((r) => setTimeout(r, 1500)); // DigiKey burst limit — back off once
+    res = await doSearch();
+  }
   if (!res.ok) throw new Error(`DigiKey search failed (${res.status})`);
 
   const json = (await res.json()) as { Products?: DkProduct[] };
