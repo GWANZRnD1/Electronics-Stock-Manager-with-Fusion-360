@@ -91,7 +91,11 @@ export default function BoardDetailPage() {
   const [error, setError] = useState("");
   const [savedMsg, setSavedMsg] = useState("");
   const [batchMsg, setBatchMsg] = useState("");
-  const [batchText, setBatchText] = useState(""); // DigiKey bulk-add string ("part,qty" per line)
+  // DigiKey bulk-add strings ("part,qty" per line). `raw` shows as soon as the
+  // shortage report loads (jellybeans kept as descriptors); `resolved` is built
+  // on batch click (jellybeans matched to real MPNs where possible).
+  const [rawBatchText, setRawBatchText] = useState("");
+  const [resolvedBatchText, setResolvedBatchText] = useState("");
   const [busy, setBusy] = useState(false);
   const [buildList, setBuildList] = useState<BuildRow[]>([]);
   const [buildMsg, setBuildMsg] = useState("");
@@ -151,12 +155,15 @@ export default function BoardDetailPage() {
     setBusy(true);
     setError("");
     setBatchMsg("");
-    setBatchText("");
+    setResolvedBatchText("");
     try {
       const rep = await jget<ShortageReport>(`/api/boards/${id}/shortage?count=${Number(count) || 0}`);
       const keys = rep.lines.map((l) => l.partKey);
       const prevKeys = new Set((report?.lines ?? []).map((l) => l.partKey));
       setReport(rep);
+      // Raw bulk-add list (DigiKey group, jellybeans as-is) — available immediately.
+      const dkRaw = rep.shortages.filter((l) => l.bucket === "digikey");
+      setRawBatchText(dkRaw.map((l) => `${l.partKey},${l.shortage}`).join("\n"));
       // First check: tick everything. Re-check: keep the user's ticks (drop lines
       // that vanished), and tick only lines that are new since the last check — so
       // unticking a part survives a re-check instead of snapping back to all.
@@ -299,81 +306,73 @@ export default function BoardDetailPage() {
       setBatchMsg("No DigiKey-group shortages to batch.");
       return;
     }
-    setBatchMsg("Building DigiKey list…");
+    setBatchMsg("Resolving jellybeans on DigiKey…");
     try {
-      // A real orderable MPN is a single token; a descriptor like
-      // "2.2 kOhm 0603 (1608 Metric)" has spaces and must be resolved to a real
-      // in-stock DigiKey part first — whether or not it matched a catalog part
-      // (catalog-matched resistors still carry a descriptor as their key).
+      // Descriptors (e.g. "2.2 kOhm 0603 (1608 Metric)", with spaces) get resolved
+      // to a real in-stock DigiKey MPN; real MPNs (single token) pass through.
       const isDescriptor = (key: string) => /\s/.test(key.trim());
-      const direct = dk
-        .filter((s) => !isDescriptor(s.partKey))
-        .map((s) => ({ partNumber: s.partKey, quantity: s.shortage }));
       const jelly = dk.filter((s) => isDescriptor(s.partKey));
-      const resolvedItems: { partNumber: string; quantity: number }[] = [];
+
+      const resolvedMap = new Map<string, string>(); // descriptor -> real MPN
       let unresolved = 0;
       let rateLimited = 0;
       if (jelly.length > 0) {
-        setBatchMsg("Resolving jellybeans on DigiKey…");
         const r = await jpost<{
-          resolved: { mpn: string | null; quantity: number; reason?: string }[];
+          resolved: { descriptor: string; mpn: string | null; reason?: string }[];
         }>("/api/buy/resolve-jellybeans", {
           items: jelly.map((s) => ({ descriptor: s.partKey, quantity: s.shortage })),
         });
         for (const it of r.resolved) {
-          if (it.mpn) resolvedItems.push({ partNumber: it.mpn, quantity: it.quantity });
+          if (it.mpn) resolvedMap.set(it.descriptor, it.mpn);
           else {
             unresolved += 1;
             if (it.reason === "rate_limited") rateLimited += 1;
           }
         }
       }
-      const items = [...direct, ...resolvedItems];
-      if (items.length === 0) {
-        setBatchMsg("Couldn't resolve any DigiKey parts to batch — use the per-part links.");
-        return;
-      }
 
-      // Show + auto-copy a paste-able bulk-add string ("part,qty" per line) before
-      // hitting the API, so the list is recoverable even if the API call fails.
+      // Final list: real MPNs as-is; jellybeans → resolved MPN, or kept AS the
+      // descriptor when unmatched (an unresolved jellybean is never dropped).
+      const items = dk.map((s) => ({
+        partNumber: isDescriptor(s.partKey) ? (resolvedMap.get(s.partKey) ?? s.partKey) : s.partKey,
+        quantity: s.shortage,
+      }));
       const bulk = items.map((i) => `${i.partNumber},${i.quantity}`).join("\n");
-      setBatchText(bulk);
+      setResolvedBatchText(bulk);
       const copied = await copyToClipboard(bulk);
 
       const note =
         unresolved > 0
-          ? ` — ${unresolved} jellybean(s) couldn't be matched` +
-            (rateLimited > 0
-              ? ` (${rateLimited} DigiKey-rate-limited — wait a minute and retry)`
-              : "") +
-            "."
+          ? ` — ${unresolved} jellybean(s) kept as-is (no DigiKey match` +
+            (rateLimited > 0 ? `; ${rateLimited} rate-limited, retry soon` : "") +
+            ")."
           : ".";
 
       try {
         const b = await jpost<{ url: string }>("/api/buy/digikey-batch", { items });
         window.open(b.url, "_blank", "noopener");
         setBatchMsg(
-          `${copied ? "Copied the bulk-add list and opened" : "Opened"} a DigiKey list (${items.length} part type(s))${note}`,
+          `${copied ? "Copied the resolved list and opened" : "Opened"} a DigiKey list (${items.length} part type(s))${note}`,
         );
       } catch (e) {
-        // The API list failed, but the bulk-add string is still copied/shown.
+        // API list failed, but the resolved bulk-add string is still copied/shown.
         setBatchMsg(
           `DigiKey list API unavailable (${e instanceof Error ? e.message : "error"}). ` +
-            `${copied ? "The bulk-add list is copied — paste it into DigiKey's “Add Multiple Parts”." : "Copy the bulk-add list below and paste it into DigiKey's “Add Multiple Parts”."}${note}`,
+            `The resolved bulk-add list is ${copied ? "copied" : "shown below"} — paste it into DigiKey's “Add Multiple Parts”.${note}`,
         );
       }
     } catch (e) {
       setBatchMsg(
-        `DigiKey batch unavailable (${e instanceof Error ? e.message : "error"}). Use per-part links below.`,
+        `DigiKey batch unavailable (${e instanceof Error ? e.message : "error"}). Use the bulk-add list or per-part links.`,
       );
     }
   }
 
-  async function copyBatch() {
-    if (!batchText) return;
-    const ok = await copyToClipboard(batchText);
+  async function copyText(text: string) {
+    if (!text) return;
+    const ok = await copyToClipboard(text);
     setBatchMsg(
-      ok ? "Bulk-add list copied to the clipboard." : "Copy failed — select the text below and copy it.",
+      ok ? "Copied to the clipboard." : "Copy failed — select the text and copy it.",
     );
   }
 
@@ -477,8 +476,9 @@ export default function BoardDetailPage() {
               onToggleAll={toggleAll}
               onDigikeyBatch={digikeyBatch}
               batchMsg={batchMsg}
-              batchText={batchText}
-              onCopyBatch={copyBatch}
+              rawBatchText={rawBatchText}
+              resolvedBatchText={resolvedBatchText}
+              onCopy={copyText}
             />
           )}
 
@@ -515,8 +515,9 @@ function ShortageView({
   onToggleAll,
   onDigikeyBatch,
   batchMsg,
-  batchText,
-  onCopyBatch,
+  rawBatchText,
+  resolvedBatchText,
+  onCopy,
 }: {
   report: ShortageReport;
   selected: Set<string>;
@@ -524,8 +525,9 @@ function ShortageView({
   onToggleAll: (checked: boolean) => void;
   onDigikeyBatch: () => void;
   batchMsg: string;
-  batchText: string;
-  onCopyBatch: () => void;
+  rawBatchText: string;
+  resolvedBatchText: string;
+  onCopy: (text: string) => void;
 }) {
   const allChecked = report.lines.length > 0 && report.lines.every((l) => selected.has(l.partKey));
   return (
@@ -613,27 +615,16 @@ function ShortageView({
             {batchMsg && <span className="text-sm text-black/60 dark:text-white/60">{batchMsg}</span>}
           </div>
 
-          {batchText && (
-            <div className="mb-4">
-              <div className="mb-1 flex items-center gap-2">
-                <span className="text-xs font-medium text-black/50 dark:text-white/50">
-                  Bulk-add list — paste into DigiKey&rsquo;s &ldquo;Add Multiple Parts&rdquo; (part,qty)
-                </span>
-                <button
-                  className="rounded border border-black/15 px-2 py-0.5 text-xs hover:bg-black/[0.03] dark:border-white/20 dark:hover:bg-white/[0.04]"
-                  onClick={onCopyBatch}
-                >
-                  Copy
-                </button>
-              </div>
-              <textarea
-                readOnly
-                className="h-28 w-full rounded-md border border-black/15 bg-transparent p-2 font-mono text-xs outline-none dark:border-white/20"
-                value={batchText}
-                onFocus={(e) => e.currentTarget.select()}
-              />
-            </div>
-          )}
+          <BulkAddBox
+            label="Bulk-add list — as-is (jellybeans kept as descriptors). Paste into DigiKey “Add Multiple Parts” (part,qty)"
+            text={rawBatchText}
+            onCopy={onCopy}
+          />
+          <BulkAddBox
+            label="Bulk-add list — DigiKey-resolved (jellybeans matched to real MPNs where possible)"
+            text={resolvedBatchText}
+            onCopy={onCopy}
+          />
 
           <div className="space-y-4">
             {BUCKETS.map(({ key, label }) => {
@@ -704,5 +695,36 @@ function BuyLinks({
         LCSC
       </a>
     </span>
+  );
+}
+
+function BulkAddBox({
+  label,
+  text,
+  onCopy,
+}: {
+  label: string;
+  text: string;
+  onCopy: (text: string) => void;
+}) {
+  if (!text) return null;
+  return (
+    <div className="mb-4">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-xs font-medium text-black/50 dark:text-white/50">{label}</span>
+        <button
+          className="rounded border border-black/15 px-2 py-0.5 text-xs hover:bg-black/[0.03] dark:border-white/20 dark:hover:bg-white/[0.04]"
+          onClick={() => onCopy(text)}
+        >
+          Copy
+        </button>
+      </div>
+      <textarea
+        readOnly
+        className="h-28 w-full rounded-md border border-black/15 bg-transparent p-2 font-mono text-xs outline-none dark:border-white/20"
+        value={text}
+        onFocus={(e) => e.currentTarget.select()}
+      />
+    </div>
   );
 }
