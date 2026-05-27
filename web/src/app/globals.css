@@ -18,6 +18,9 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    /* Force native controls dark in dark mode — `light dark` alone isn't
+       reliably honored by select popups, especially on mobile. */
+    color-scheme: dark;
   }
 }
 
@@ -25,4 +28,11 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Native <select> dropdowns don't always follow color-scheme, so paint the
+   options with the theme's own colors (dark surface + light text in dark mode). */
+option {
+  background-color: var(--background);
+  color: var(--foreground);
 }
