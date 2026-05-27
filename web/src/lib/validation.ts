@@ -1,13 +1,36 @@
 /** Zod schemas validating request bodies at the API boundary. */
 import { z } from "zod";
 
-export const createPartSchema = z.object({
-  mpn: z.string().trim().min(1).max(128),
+const partFieldShape = {
   manufacturer: z.string().trim().max(128).optional(),
   name: z.string().trim().max(256).optional(),
   category: z.string().trim().max(64).optional(),
   package: z.string().trim().max(64).optional(),
   description: z.string().trim().max(512).optional(),
+  supplier: z.string().trim().max(64).optional(),
+  spn: z.string().trim().max(128).optional(),
+  value: z.string().trim().max(64).optional(),
+  unitCost: z.number().nonnegative().max(1_000_000).nullable().optional(),
+};
+
+export const createPartSchema = z.object({
+  mpn: z.string().trim().min(1).max(128),
+  ...partFieldShape,
+});
+
+export const updatePartSchema = z
+  .object({
+    mpn: z.string().trim().min(1).max(128).optional(),
+    ...partFieldShape,
+  })
+  .refine((d) => Object.keys(d).length > 0, { message: "no fields to update" });
+
+export const confirmStockSchema = z.object({
+  locationId: z.number().int().positive(),
+});
+
+export const purgeSchema = z.object({
+  confirm: z.literal("PURGE"),
 });
 
 export const createLocationSchema = z.object({

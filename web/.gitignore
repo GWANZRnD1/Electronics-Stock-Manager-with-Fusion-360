@@ -32,6 +32,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# local migration data — do NOT publish real inventory/pricing to the repo
+/migration/*.csv
 
 # vercel
 .vercel

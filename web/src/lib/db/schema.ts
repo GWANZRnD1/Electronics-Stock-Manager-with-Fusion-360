@@ -4,9 +4,11 @@
  * part_id), and BOM rows by board. Change stock only by appending an
  * inventory_txns row; keep stock_items.quantity as the materialized sum.
  */
+import { sql } from "drizzle-orm";
 import {
   index,
   integer,
+  numeric,
   pgTable,
   serial,
   text,
@@ -18,17 +20,22 @@ export const parts = pgTable(
   "parts",
   {
     id: serial("id").primaryKey(),
-    mpn: text("mpn").notNull(),
+    mpn: text("mpn").notNull().default(""), // manufacturer part number; may be blank for generics
     manufacturer: text("manufacturer").notNull().default(""),
     name: text("name").notNull().default(""), // human label, e.g. "RES 47 OHM 1% 0603"
     category: text("category").notNull().default(""), // e.g. "Resistor", "Capacitor", "IC"
     package: text("package").notNull().default(""), // size/footprint, e.g. "0603", "SOIC-14", "TH"
     description: text("description").notNull().default(""),
+    supplier: text("supplier").notNull().default(""), // e.g. "DigiKey", "LCSC", "Jellybean"
+    spn: text("spn").notNull().default(""), // supplier part number (e.g. DigiKey part number)
+    value: text("value").notNull().default(""), // component value, e.g. "47Ω", "0.1µF", "16MHz"
+    unitCost: numeric("unit_cost", { precision: 14, scale: 6 }), // per-unit cost; null if unknown
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("parts_mpn_uq").on(t.mpn),
+    // Partial unique index: real MPNs stay unique, but multiple blank-MPN generics are allowed.
+    uniqueIndex("parts_mpn_uq").on(t.mpn).where(sql`${t.mpn} <> ''`),
     index("parts_category_idx").on(t.category),
     index("parts_package_idx").on(t.package),
   ],
@@ -55,6 +62,8 @@ export const stockItems = pgTable(
       .notNull()
       .references(() => locations.id),
     quantity: integer("quantity").notNull().default(0),
+    // When this part+location count was last physically confirmed (receive/adjust or manual).
+    lastConfirmedAt: timestamp("last_confirmed_at", { withTimezone: true }),
   },
   (t) => [
     uniqueIndex("stock_part_location_uq").on(t.partId, t.locationId),

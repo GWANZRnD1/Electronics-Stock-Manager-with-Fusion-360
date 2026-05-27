@@ -31,3 +31,14 @@ export function jpost<T>(url: string, body: unknown): Promise<T> {
 export function jput<T>(url: string, body: unknown): Promise<T> {
   return send<T>("PUT", url, body);
 }
+
+export function jpatch<T>(url: string, body: unknown): Promise<T> {
+  return send<T>("PATCH", url, body);
+}
+
+/** POST a raw text body (e.g. an uploaded CSV file's contents). */
+export async function jpostText<T>(url: string, text: string): Promise<T> {
+  return handle<T>(
+    await fetch(url, { method: "POST", headers: { "content-type": "text/csv" }, body: text }),
+  );
+}
