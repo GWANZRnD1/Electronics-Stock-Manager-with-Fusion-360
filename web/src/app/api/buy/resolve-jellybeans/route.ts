@@ -20,40 +20,33 @@ const schema = z.object({
     .max(200),
 });
 
-interface Resolved {
-  mpn: string;
-  manufacturer: string;
-  unitPrice: number;
-  stock: number;
-}
+type Outcome =
+  | { mpn: string; manufacturer: string; unitPrice: number }
+  | { mpn: null; reason: "no_match" | "rate_limited" | "error" };
 
-// Per-instance cache keyed by the normalized keyword query. `null` = looked up,
-// nothing usable found (so we don't re-hit DigiKey for the same miss).
-const cache = new Map<string, Resolved | null>();
+// Per-instance cache keyed by the normalized keyword query. Only successes and
+// confirmed misses are cached; transient failures (429/errors) are not, so a
+// retry after the rate limit clears can still succeed.
+const cache = new Map<string, Outcome>();
 
-async function resolve(descriptor: string): Promise<Resolved | null> {
+async function resolve(descriptor: string): Promise<Outcome> {
   const query = descriptorToQuery(descriptor);
   const key = query.keywords.toLowerCase();
   const cached = cache.get(key);
-  if (cached !== undefined) return cached;
+  if (cached) return cached;
 
-  let result: Resolved | null = null;
+  let outcome: Outcome;
   try {
     const best = pickCheapestInStock(await digikeySearchCandidates(query.keywords), query);
-    if (best) {
-      result = {
-        mpn: best.mpn,
-        manufacturer: best.manufacturer,
-        unitPrice: best.unitPrice,
-        stock: best.stock,
-      };
-    }
-  } catch {
-    result = null; // transient/search error — treat as unresolved, don't cache a hard miss forever
-    return result;
+    outcome = best
+      ? { mpn: best.mpn, manufacturer: best.manufacturer, unitPrice: best.unitPrice }
+      : { mpn: null, reason: "no_match" };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "";
+    return { mpn: null, reason: msg.includes("429") ? "rate_limited" : "error" };
   }
-  cache.set(key, result);
-  return result;
+  cache.set(key, outcome);
+  return outcome;
 }
 
 /**
@@ -75,13 +68,14 @@ export async function POST(request: Request) {
     mpn: string | null;
     manufacturer?: string;
     unitPrice?: number;
+    reason?: string;
   }[] = [];
   for (const { descriptor, quantity } of parsed.data.items) {
-    const hit = await resolve(descriptor);
+    const r = await resolve(descriptor);
     resolved.push(
-      hit
-        ? { descriptor, quantity, mpn: hit.mpn, manufacturer: hit.manufacturer, unitPrice: hit.unitPrice }
-        : { descriptor, quantity, mpn: null },
+      r.mpn !== null
+        ? { descriptor, quantity, mpn: r.mpn, manufacturer: r.manufacturer, unitPrice: r.unitPrice }
+        : { descriptor, quantity, mpn: null, reason: r.reason },
     );
   }
 

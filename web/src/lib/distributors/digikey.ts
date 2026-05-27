@@ -158,9 +158,10 @@ export async function digikeySearchCandidates(
       body: JSON.stringify({ Keywords: keywords, Limit: limit }),
     });
 
+  // DigiKey burst limit (429) — back off and retry a couple of times (1.5s, 3s).
   let res = await doSearch();
-  if (res.status === 429) {
-    await new Promise((r) => setTimeout(r, 1500)); // DigiKey burst limit — back off once
+  for (let wait = 1500; res.status === 429 && wait <= 3000; wait *= 2) {
+    await new Promise((r) => setTimeout(r, wait));
     res = await doSearch();
   }
   if (!res.ok) throw new Error(`DigiKey search failed (${res.status})`);

@@ -300,15 +300,20 @@ export default function BoardDetailPage() {
       const jelly = dk.filter((s) => isDescriptor(s.partKey));
       const resolvedItems: { partNumber: string; quantity: number }[] = [];
       let unresolved = 0;
+      let rateLimited = 0;
       if (jelly.length > 0) {
         setBatchMsg("Resolving jellybeans on DigiKey…");
-        const r = await jpost<{ resolved: { mpn: string | null; quantity: number }[] }>(
-          "/api/buy/resolve-jellybeans",
-          { items: jelly.map((s) => ({ descriptor: s.partKey, quantity: s.shortage })) },
-        );
+        const r = await jpost<{
+          resolved: { mpn: string | null; quantity: number; reason?: string }[];
+        }>("/api/buy/resolve-jellybeans", {
+          items: jelly.map((s) => ({ descriptor: s.partKey, quantity: s.shortage })),
+        });
         for (const it of r.resolved) {
           if (it.mpn) resolvedItems.push({ partNumber: it.mpn, quantity: it.quantity });
-          else unresolved += 1;
+          else {
+            unresolved += 1;
+            if (it.reason === "rate_limited") rateLimited += 1;
+          }
         }
       }
       const items = [...direct, ...resolvedItems];
@@ -318,10 +323,15 @@ export default function BoardDetailPage() {
       }
       const b = await jpost<{ url: string }>("/api/buy/digikey-batch", { items });
       window.open(b.url, "_blank", "noopener");
-      setBatchMsg(
-        `Opened a DigiKey list (${items.length} part type(s))` +
-          (unresolved > 0 ? ` — ${unresolved} jellybean(s) couldn't be matched.` : "."),
-      );
+      const note =
+        unresolved > 0
+          ? ` — ${unresolved} jellybean(s) couldn't be matched` +
+            (rateLimited > 0
+              ? ` (${rateLimited} DigiKey-rate-limited — wait a minute and retry)`
+              : "") +
+            "."
+          : ".";
+      setBatchMsg(`Opened a DigiKey list (${items.length} part type(s))${note}`);
     } catch (e) {
       setBatchMsg(
         `DigiKey batch unavailable (${e instanceof Error ? e.message : "error"}). Use per-part links below.`,
