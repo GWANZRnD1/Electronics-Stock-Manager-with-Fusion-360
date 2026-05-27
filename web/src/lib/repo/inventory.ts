@@ -529,6 +529,9 @@ export async function importInventory(rows: NormalizedRow[]): Promise<ImportResu
 // A part has a usable distributor lookup key when it has an MPN or a supplier part number.
 const hasLookupKey = sql`(${parts.mpn} <> '' OR ${parts.spn} <> '')`;
 const apiSupplier = sql`lower(${parts.supplier}) in ('digikey', 'mouser')`;
+// Suppliers whose unit cost can be refreshed from a live offer — LCSC too, via
+// its C-number (the wmsc lookup returns USD price breaks).
+const costSupplier = sql`lower(${parts.supplier}) in ('digikey', 'mouser', 'lcsc')`;
 
 // Parts a "fill missing details" pass could enrich: a non-jellybean part with a
 // lookup key that is missing at least one fillable field. The MPN can only be
@@ -548,7 +551,7 @@ const fillEligible = and(
 
 export interface SyncCounts {
   values: number; // parts missing details a lookup could fill
-  costs: number; // DigiKey/Mouser parts whose unit cost could be refreshed
+  costs: number; // DigiKey/Mouser/LCSC parts whose unit cost could be refreshed
 }
 
 /** Counts for the distributor-sync panel (how many parts each operation would touch). */
@@ -558,7 +561,7 @@ export async function syncCounts(): Promise<SyncCounts> {
   const [c] = await db
     .select({ n: sql<number>`count(*)` })
     .from(parts)
-    .where(and(apiSupplier, hasLookupKey));
+    .where(and(costSupplier, hasLookupKey));
   return { values: Number(v?.n ?? 0), costs: Number(c?.n ?? 0) };
 }
 
@@ -576,9 +579,10 @@ export interface SyncBatchResult {
  *  - `fillValues`: backfill any blank detail (value, category, package, manufacturer,
  *    description) for non-jellybean parts, and — for DigiKey/Mouser parts with a blank
  *    MPN — fill the MPN from the supplier part number (SPN → MPN).
- *  - `refreshCosts`: overwrite unit cost (USD) for DigiKey/Mouser parts.
- * The lookup key prefers the supplier part number for DigiKey/Mouser (a precise
- * match), else the MPN — so a part with only an SPN can still be enriched. Sweeps
+ *  - `refreshCosts`: overwrite unit cost (USD) for DigiKey/Mouser/LCSC parts.
+ * The lookup key prefers the supplier part number for DigiKey/Mouser/LCSC (a
+ * precise match — the LCSC C-number), else the MPN, so a part with only an SPN
+ * can still be enriched. Sweeps
  * by ascending id and throttles between parts to respect rate limits; fields are
  * only written when a live (non-mock) lookup yields data, so a failed/mock lookup
  * never wipes data. Per-part progress is logged so silent no-ops are diagnosable.
@@ -603,7 +607,7 @@ export async function syncFromDistributors(
 
   const clauses = [];
   if (fillValues) clauses.push(fillEligible);
-  if (refreshCosts) clauses.push(and(apiSupplier, hasLookupKey));
+  if (refreshCosts) clauses.push(and(costSupplier, hasLookupKey));
   const eligible = clauses.length === 1 ? clauses[0] : or(...clauses);
 
   const db = getDb();
@@ -631,7 +635,9 @@ export async function syncFromDistributors(
     const t = targets[i];
     const supplier = t.supplier.toLowerCase();
     const isApi = supplier === "digikey" || supplier === "mouser";
-    const key = isApi && t.spn ? t.spn : t.mpn || t.spn; // SPN is the precise key for DigiKey/Mouser
+    const isLcsc = supplier === "lcsc";
+    // SPN is the precise lookup key for DigiKey/Mouser; for LCSC it's the C-number.
+    const key = (isApi || isLcsc) && t.spn ? t.spn : t.mpn || t.spn;
     if (!key) continue;
 
     let offers;
@@ -698,7 +704,7 @@ export async function syncFromDistributors(
         }
       }
     }
-    if (refreshCosts && isApi) {
+    if (refreshCosts && (isApi || isLcsc)) {
       const offer = offers.find((o) => !o.mock && o.distributor === supplier);
       const cost = offer ? unitCostFromOffer(offer) : null;
       if (cost !== null) patch.unitCost = money(cost);

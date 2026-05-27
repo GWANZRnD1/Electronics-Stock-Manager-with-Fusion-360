@@ -207,8 +207,8 @@ function SyncPanel() {
     <section className={cardClass}>
       <h2 className="mb-1 font-medium">Sync from distributors</h2>
       <p className="mb-3 text-sm text-black/60 dark:text-white/60">
-        Look up DigiKey/Mouser parts to fill details — one lookup per part, throttled to respect API
-        rate limits.
+        Look up DigiKey/Mouser/LCSC parts to fill details — one lookup per part, throttled to respect
+        API rate limits.
       </p>
       {status === null && !msg && <p className="text-sm text-black/50 dark:text-white/50">Loading…</p>}
       {status && !status.configured && (
@@ -244,7 +244,7 @@ function SyncPanel() {
             />
             <span>
               <span className="font-medium">Refresh unit costs in USD ({status.costs})</span> —
-              DigiKey/Mouser parts only; LCSC and unidentified parts are left unchanged.
+              DigiKey/Mouser, plus LCSC via its C-number; unidentified parts are left unchanged.
             </span>
           </label>
           <div className="flex flex-wrap items-center gap-3 pt-1">
