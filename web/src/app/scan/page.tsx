@@ -140,10 +140,10 @@ export default function ScanPage() {
           const r = await jget<{ offers: Offer[] }>(`/api/parts/lookup?mpn=${encodeURIComponent(m)}`);
           const o = r.offers.find((x) => !x.mock && (x.manufacturer || x.category || x.package));
           if (o) {
-            setManufacturer(o.manufacturer || "");
-            setCategory(o.category || "");
-            setPkg(o.package || "");
-            setName(o.description || "");
+            if (o.manufacturer) setManufacturer(o.manufacturer);
+            if (o.category) setCategory(o.category);
+            if (o.package) setPkg(o.package);
+            if (o.description) setName(o.description); // keep a scanned name if the offer has none
           }
           // The supplier part number (e.g. Mouser "584-…") isn't in the scanned
           // DataMatrix; pull it from the matching distributor's live offer.
@@ -168,6 +168,12 @@ export default function ScanPage() {
       setSpn(label.distributorPart ?? "");
       setSupplier(SUPPLIER_LABEL[label.distributor] ?? "");
       setQty(label.quantity != null ? String(label.quantity) : "");
+      // Clear prior metadata so a back-to-back scan never carries it over; the
+      // MPN lookup refills these (and LCSC's Name is set just below).
+      setManufacturer("");
+      setCategory("");
+      setPkg("");
+      setName("");
       // LCSC's "pm" is often a product name (Chinese text, spaces), not a real
       // MPN: route it to Name and use the C-code as the identifier. A clean
       // alphanumeric pm is kept as the MPN.

@@ -1,6 +1,6 @@
 /** Unified part lookup across distributors, with a short in-memory TTL cache. */
 import { digikeySearch } from "./digikey";
-import { lcscSearch } from "./lcsc";
+import { lcscLookupByCNumber, lcscSearch } from "./lcsc";
 import { mouserSearch } from "./mouser";
 import type { DistributorOffer, LookupResult } from "./types";
 
@@ -13,12 +13,19 @@ export async function lookupPart(mpn: string): Promise<LookupResult> {
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.result;
 
   // Query distributors in parallel; a failing one (bad key, rate limit) is skipped.
-  const settled = await Promise.allSettled([digikeySearch(mpn), mouserSearch(mpn)]);
+  // An LCSC C-number additionally enriches from EasyEDA (manufacturer/package).
+  const isCNumber = /^c\d+$/i.test(mpn.trim());
+  const settled = await Promise.allSettled([
+    digikeySearch(mpn),
+    mouserSearch(mpn),
+    isCNumber ? lcscLookupByCNumber(mpn) : Promise.resolve(null),
+  ]);
   const offers: DistributorOffer[] = [];
   for (const s of settled) {
     if (s.status === "fulfilled" && s.value) offers.push(s.value);
   }
-  offers.push(lcscSearch(mpn)); // link-only LCSC offer (no public API), never fails
+  // Always keep an LCSC entry; fall back to the link-only offer if EasyEDA gave nothing.
+  if (!offers.some((o) => o.distributor === "lcsc")) offers.push(lcscSearch(mpn));
 
   const result: LookupResult = { mpn, offers };
   cache.set(key, { at: Date.now(), result });
