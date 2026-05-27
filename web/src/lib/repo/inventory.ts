@@ -7,7 +7,7 @@ import type { PgColumn } from "drizzle-orm/pg-core";
 
 import { getDb } from "@/lib/db";
 import { lookupPart } from "@/lib/distributors";
-import { inventoryTxns, locations, parts, stockItems } from "@/lib/db/schema";
+import { buildConsumptions, inventoryTxns, locations, parts, stockItems } from "@/lib/db/schema";
 import { bundleCategories, categoryKey } from "@/lib/domain/categories";
 import { deriveField, deriveValue, unitCostFromOffer } from "@/lib/domain/enrich";
 import type { NormalizedRow } from "@/lib/domain/inventoryCsv";
@@ -122,12 +122,67 @@ export function listLocations() {
   return getDb().select().from(locations).orderBy(locations.name);
 }
 
-export async function createLocation(input: { name: string; description?: string }) {
+export async function getLocation(id: number) {
+  const [row] = await getDb().select().from(locations).where(eq(locations.id, id));
+  return row ?? null;
+}
+
+export async function createLocation(input: {
+  name: string;
+  description?: string;
+  aruco?: number | null;
+}) {
   const [row] = await getDb()
     .insert(locations)
-    .values({ name: input.name, description: input.description ?? "" })
+    .values({ name: input.name, description: input.description ?? "", aruco: input.aruco ?? null })
     .returning();
   return row;
+}
+
+/** Patch a location's editable fields. `aruco: null` clears the marker assignment. */
+export async function updateLocation(
+  id: number,
+  patch: { name?: string; description?: string; aruco?: number | null },
+) {
+  const set: Partial<typeof locations.$inferInsert> = {};
+  if (patch.name !== undefined) set.name = patch.name;
+  if (patch.description !== undefined) set.description = patch.description;
+  if (patch.aruco !== undefined) set.aruco = patch.aruco;
+  if (Object.keys(set).length === 0) return getLocation(id);
+  const [row] = await getDb().update(locations).set(set).where(eq(locations.id, id)).returning();
+  return row ?? null;
+}
+
+/** Rows that reference a location (stock + history) — a location can't be deleted while any exist. */
+export async function locationRefCounts(id: number) {
+  const db = getDb();
+  const n = sql<number>`count(*)`;
+  const [stock, txns, consumptions] = await Promise.all([
+    db.select({ n }).from(stockItems).where(eq(stockItems.locationId, id)),
+    db.select({ n }).from(inventoryTxns).where(eq(inventoryTxns.locationId, id)),
+    db.select({ n }).from(buildConsumptions).where(eq(buildConsumptions.locationId, id)),
+  ]);
+  const counts = {
+    stock: Number(stock[0]?.n ?? 0),
+    txns: Number(txns[0]?.n ?? 0),
+    consumptions: Number(consumptions[0]?.n ?? 0),
+  };
+  return { ...counts, total: counts.stock + counts.txns + counts.consumptions };
+}
+
+export async function deleteLocation(id: number) {
+  await getDb().delete(locations).where(eq(locations.id, id));
+}
+
+/** Smallest unused marker id in [0, capacity), or null if the dictionary is full. */
+export async function nextFreeAruco(capacity: number): Promise<number | null> {
+  const rows = await getDb()
+    .select({ aruco: locations.aruco })
+    .from(locations)
+    .where(sql`${locations.aruco} IS NOT NULL`);
+  const used = new Set(rows.map((r) => r.aruco));
+  for (let i = 0; i < capacity; i++) if (!used.has(i)) return i;
+  return null;
 }
 
 export function listStock(limit = 500) {

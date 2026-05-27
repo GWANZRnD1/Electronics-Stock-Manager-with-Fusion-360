@@ -47,10 +47,22 @@ export const locations = pgTable(
   {
     id: serial("id").primaryKey(),
     name: text("name").notNull(),
-    description: text("description").notNull().default(""),
+    description: text("description").notNull().default(""), // free-form notes for the location
+    // ArUco marker id assigned to this physical location (null = none yet). Unique
+    // among assigned values so two locations never share a marker.
+    aruco: integer("aruco"),
   },
-  (t) => [uniqueIndex("locations_name_uq").on(t.name)],
+  (t) => [
+    uniqueIndex("locations_name_uq").on(t.name),
+    uniqueIndex("locations_aruco_uq").on(t.aruco).where(sql`${t.aruco} IS NOT NULL`),
+  ],
 );
+
+// Simple key/value store for app-wide settings (e.g. the ArUco dictionary + print size).
+export const appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull().default(""),
+});
 
 export const stockItems = pgTable(
   "stock_items",

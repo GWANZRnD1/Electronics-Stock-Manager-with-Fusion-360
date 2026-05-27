@@ -47,9 +47,28 @@ export const syncSchema = z
   })
   .refine((d) => d.fillValues || d.refreshCosts, { message: "select at least one operation" });
 
+// ArUco marker id (0-based). Bounded generously; the real cap is the dictionary
+// capacity, enforced server-side. `null` clears the assignment; omitted = auto-assign.
+const arucoId = z.number().int().min(0).max(9999);
+
 export const createLocationSchema = z.object({
   name: z.string().trim().min(1).max(64),
   description: z.string().trim().max(256).optional(),
+  aruco: arucoId.nullable().optional(),
+});
+
+export const updateLocationSchema = z
+  .object({
+    name: z.string().trim().min(1).max(64).optional(),
+    description: z.string().trim().max(256).optional(),
+    aruco: arucoId.nullable().optional(),
+  })
+  .refine((d) => Object.keys(d).length > 0, { message: "no fields to update" });
+
+export const arucoConfigSchema = z.object({
+  // Keep in lockstep with ARUCO_DICT_NAMES in lib/aruco/marker.ts.
+  dict: z.enum(["4X4_50", "5X5_100", "6X6_250"]),
+  sizeMm: z.number().min(5).max(200),
 });
 
 export const receiveStockSchema = z.object({

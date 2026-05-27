@@ -16,6 +16,7 @@
     "db:studio": "drizzle-kit studio",
     "db:seedbench": "tsx scripts/seed-bench.ts",
     "db:reset": "tsx scripts/db-reset.ts",
+    "db:apply-aruco": "tsx scripts/apply-aruco-schema.ts",
     "dk:probe": "tsx scripts/dk-probe.ts"
   },
   "dependencies": {

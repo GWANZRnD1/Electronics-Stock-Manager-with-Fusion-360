@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 
+import { ArucoMarker } from "@/components/ArucoMarker";
 import { Nav } from "@/components/Nav";
 import { Modal, btn, cardClass, inputClass } from "@/components/ui";
-import { jget, jpost, jpostText } from "@/lib/client";
+import { ARUCO_DICT_NAMES, dictCapacity, type ArucoDictName } from "@/lib/aruco/marker";
+import { jget, jpost, jpostText, jput } from "@/lib/client";
 
 export default function SettingsPage() {
   const [importOpen, setImportOpen] = useState(false);
@@ -26,6 +28,7 @@ export default function SettingsPage() {
             </button>
           </section>
           <SyncPanel />
+          <ArucoPanel />
         </div>
       </main>
 
@@ -284,6 +287,107 @@ function SyncPanel() {
         </div>
       )}
       {msg && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{msg}</p>}
+    </section>
+  );
+}
+
+interface ArucoConfig {
+  dict: ArucoDictName;
+  sizeMm: number;
+}
+
+/** Global ArUco settings: which dictionary location markers use, and their print size. */
+function ArucoPanel() {
+  const [dict, setDict] = useState<ArucoDictName>("6X6_250");
+  const [sizeMm, setSizeMm] = useState(25);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const c = await jget<ArucoConfig>("/api/settings/aruco");
+        if (active) {
+          setDict(c.dict);
+          setSizeMm(c.sizeMm);
+          setLoaded(true);
+        }
+      } catch (e) {
+        if (active && e instanceof Error && e.message !== "locked") setMsg(e.message);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function save() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await jput("/api/settings/aruco", { dict, sizeMm });
+      setMsg("Saved.");
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Save failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className={cardClass}>
+      <h2 className="mb-1 font-medium">ArUco markers</h2>
+      <p className="mb-3 text-sm text-black/60 dark:text-white/60">
+        Dictionary and print size for the markers assigned to storage locations. Changing the
+        dictionary affects how new markers are generated; re-print any markers you change.
+      </p>
+      <div className="flex flex-wrap items-end gap-4 text-sm">
+        <label className="flex flex-col gap-1">
+          <span className="text-black/60 dark:text-white/60">Dictionary</span>
+          <select
+            className={inputClass}
+            value={dict}
+            onChange={(e) => setDict(e.target.value as ArucoDictName)}
+            disabled={!loaded || busy}
+          >
+            {ARUCO_DICT_NAMES.map((d) => (
+              <option key={d} value={d}>
+                {d} ({dictCapacity(d)} ids)
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-black/60 dark:text-white/60">Print size (mm)</span>
+          <input
+            className={inputClass}
+            type="number"
+            min={5}
+            max={200}
+            value={sizeMm}
+            onChange={(e) => setSizeMm(Number(e.target.value))}
+            disabled={!loaded || busy}
+          />
+        </label>
+        <div className="flex flex-col items-center gap-1">
+          <span className="text-black/60 dark:text-white/60">Preview (id 0)</span>
+          <ArucoMarker dict={dict} id={0} size={64} />
+        </div>
+        <button className={btn} onClick={save} disabled={!loaded || busy || sizeMm < 5}>
+          {busy ? "Saving…" : "Save"}
+        </button>
+        {msg && (
+          <span
+            className={
+              msg === "Saved." ? "text-green-700 dark:text-green-400" : "text-red-600 dark:text-red-400"
+            }
+          >
+            {msg}
+          </span>
+        )}
+      </div>
     </section>
   );
 }
