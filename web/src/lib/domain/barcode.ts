@@ -102,13 +102,18 @@ export function parseLabel(raw: string | null | undefined): ScannedLabel {
   };
 }
 
+/** Strip surrounding quotes/space — LCSC QR fields appear quoted or bare. */
+function unquote(s: string): string {
+  return s.trim().replace(/^["']+|["']+$/g, "").trim();
+}
+
 function parseLcsc(text: string): ScannedLabel {
   const fields: Record<string, string> = {};
   for (const pair of text.slice(1, -1).split(",")) {
     const idx = pair.indexOf(":");
     if (idx === -1) continue;
-    const key = pair.slice(0, idx).trim();
-    if (key) fields[key] = pair.slice(idx + 1).trim();
+    const key = unquote(pair.slice(0, idx));
+    if (key) fields[key] = unquote(pair.slice(idx + 1));
   }
   return {
     distributor: "lcsc",

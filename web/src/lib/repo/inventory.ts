@@ -131,6 +131,8 @@ export async function receiveStock(input: {
   name?: string;
   category?: string;
   package?: string;
+  supplier?: string;
+  spn?: string;
 }) {
   const db = getDb();
   return db.transaction(async (tx) => {
@@ -144,6 +146,8 @@ export async function receiveStock(input: {
           name: input.name ?? "",
           category: input.category ?? "",
           package: input.package ?? "",
+          supplier: input.supplier ?? "",
+          spn: input.spn ?? "",
         })
         .returning();
     } else {
@@ -153,6 +157,8 @@ export async function receiveStock(input: {
       if (!part.name && input.name) patch.name = input.name;
       if (!part.category && input.category) patch.category = input.category;
       if (!part.package && input.package) patch.package = input.package;
+      if (!part.supplier && input.supplier) patch.supplier = input.supplier;
+      if (!part.spn && input.spn) patch.spn = input.spn;
       if (Object.keys(patch).length > 0) {
         await tx.update(parts).set(patch).where(eq(parts.id, part.id));
       }

@@ -52,11 +52,13 @@ export const receiveStockSchema = z.object({
   locationId: z.number().int().positive(),
   quantity: z.number().int().positive().max(1_000_000),
   ref: z.string().trim().max(128).optional(),
-  // optional part metadata (auto-read from DigiKey/Mouser when receiving)
+  // optional part metadata (auto-read from a scanned label / DigiKey / Mouser)
   manufacturer: z.string().trim().max(128).optional(),
   name: z.string().trim().max(256).optional(),
   category: z.string().trim().max(64).optional(),
   package: z.string().trim().max(64).optional(),
+  supplier: z.string().trim().max(64).optional(),
+  spn: z.string().trim().max(128).optional(),
 });
 
 export const unlockSchema = z.object({

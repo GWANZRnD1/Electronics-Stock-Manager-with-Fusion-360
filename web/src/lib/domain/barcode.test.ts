@@ -67,6 +67,15 @@ describe("parseLabel", () => {
     expect(label.labelFormat).toBe("lcsc_qr");
   });
 
+  it("parses an LCSC QR with quoted keys/values", () => {
+    const label = parseLabel('{"pc":"C312270","pm":"STM32F103C8T6","qty":"50"}');
+
+    expect(label.distributor).toBe("lcsc");
+    expect(label.distributorPart).toBe("C312270");
+    expect(label.mpn).toBe("STM32F103C8T6");
+    expect(label.quantity).toBe(50);
+  });
+
   it("parses a bare LCSC C-number", () => {
     const label = parseLabel("C312270");
 

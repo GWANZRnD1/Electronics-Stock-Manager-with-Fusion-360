@@ -49,6 +49,13 @@ const READER_OPTIONS: ReaderOptions = {
   maxNumberOfSymbols: 1,
 };
 
+// Map a parsed label's distributor to the supplier label stored on the part.
+const SUPPLIER_LABEL: Record<string, string> = {
+  digikey: "DigiKey",
+  mouser: "Mouser",
+  lcsc: "LCSC",
+};
+
 const inputClass =
   "w-full rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20";
 
@@ -72,6 +79,8 @@ export default function ScanPage() {
   const [rawText, setRawText] = useState(""); // exact decoded payload (debug/verify)
   const [locations, setLocations] = useState<Location[]>([]);
   const [mpn, setMpn] = useState("");
+  const [spn, setSpn] = useState("");
+  const [supplier, setSupplier] = useState("");
   const [qty, setQty] = useState("");
   const [scanInfo, setScanInfo] = useState("");
   const [locationId, setLocationId] = useState<number | "">("");
@@ -139,6 +148,8 @@ export default function ScanPage() {
     try {
       const label = parseLabel(raw);
       setMpn(label.mpn ?? label.distributorPart ?? "");
+      setSpn(label.distributorPart ?? "");
+      setSupplier(SUPPLIER_LABEL[label.distributor] ?? "");
       setQty(label.quantity != null ? String(label.quantity) : "");
       setScanInfo(
         `${label.distributor} · ${label.mpn ?? label.distributorPart ?? "?"}` +
@@ -388,9 +399,13 @@ export default function ScanPage() {
         name,
         category,
         package: pkg,
+        supplier,
+        spn,
       });
       setMsg(`Received ${qty} × ${mpn.trim()} → on hand ${r.quantity}.`);
       setMpn("");
+      setSpn("");
+      setSupplier("");
       setQty("");
       setScanInfo("");
       setRawText("");
@@ -522,6 +537,20 @@ export default function ScanPage() {
           {looking && (
             <p className="text-xs text-black/50 dark:text-white/50">Reading part info…</p>
           )}
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              className={inputClass}
+              placeholder="Supplier (DigiKey/LCSC…)"
+              value={supplier}
+              onChange={(e) => setSupplier(e.target.value)}
+            />
+            <input
+              className={inputClass}
+              placeholder="Supplier part # (e.g. LCSC C-code)"
+              value={spn}
+              onChange={(e) => setSpn(e.target.value)}
+            />
+          </div>
           <div className="grid grid-cols-2 gap-2">
             <input
               className={inputClass}
