@@ -64,6 +64,16 @@ function fmtDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+/** Best-effort clipboard copy (secure-context only); returns whether it worked. */
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const inputClass =
   "w-full rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20";
 const btnClass =
@@ -81,6 +91,7 @@ export default function BoardDetailPage() {
   const [error, setError] = useState("");
   const [savedMsg, setSavedMsg] = useState("");
   const [batchMsg, setBatchMsg] = useState("");
+  const [batchText, setBatchText] = useState(""); // DigiKey bulk-add string ("part,qty" per line)
   const [busy, setBusy] = useState(false);
   const [buildList, setBuildList] = useState<BuildRow[]>([]);
   const [buildMsg, setBuildMsg] = useState("");
@@ -140,6 +151,7 @@ export default function BoardDetailPage() {
     setBusy(true);
     setError("");
     setBatchMsg("");
+    setBatchText("");
     try {
       const rep = await jget<ShortageReport>(`/api/boards/${id}/shortage?count=${Number(count) || 0}`);
       const keys = rep.lines.map((l) => l.partKey);
@@ -321,8 +333,13 @@ export default function BoardDetailPage() {
         setBatchMsg("Couldn't resolve any DigiKey parts to batch — use the per-part links.");
         return;
       }
-      const b = await jpost<{ url: string }>("/api/buy/digikey-batch", { items });
-      window.open(b.url, "_blank", "noopener");
+
+      // Show + auto-copy a paste-able bulk-add string ("part,qty" per line) before
+      // hitting the API, so the list is recoverable even if the API call fails.
+      const bulk = items.map((i) => `${i.partNumber},${i.quantity}`).join("\n");
+      setBatchText(bulk);
+      const copied = await copyToClipboard(bulk);
+
       const note =
         unresolved > 0
           ? ` — ${unresolved} jellybean(s) couldn't be matched` +
@@ -331,12 +348,33 @@ export default function BoardDetailPage() {
               : "") +
             "."
           : ".";
-      setBatchMsg(`Opened a DigiKey list (${items.length} part type(s))${note}`);
+
+      try {
+        const b = await jpost<{ url: string }>("/api/buy/digikey-batch", { items });
+        window.open(b.url, "_blank", "noopener");
+        setBatchMsg(
+          `${copied ? "Copied the bulk-add list and opened" : "Opened"} a DigiKey list (${items.length} part type(s))${note}`,
+        );
+      } catch (e) {
+        // The API list failed, but the bulk-add string is still copied/shown.
+        setBatchMsg(
+          `DigiKey list API unavailable (${e instanceof Error ? e.message : "error"}). ` +
+            `${copied ? "The bulk-add list is copied — paste it into DigiKey's “Add Multiple Parts”." : "Copy the bulk-add list below and paste it into DigiKey's “Add Multiple Parts”."}${note}`,
+        );
+      }
     } catch (e) {
       setBatchMsg(
         `DigiKey batch unavailable (${e instanceof Error ? e.message : "error"}). Use per-part links below.`,
       );
     }
+  }
+
+  async function copyBatch() {
+    if (!batchText) return;
+    const ok = await copyToClipboard(batchText);
+    setBatchMsg(
+      ok ? "Bulk-add list copied to the clipboard." : "Copy failed — select the text below and copy it.",
+    );
   }
 
   return (
@@ -439,6 +477,8 @@ export default function BoardDetailPage() {
               onToggleAll={toggleAll}
               onDigikeyBatch={digikeyBatch}
               batchMsg={batchMsg}
+              batchText={batchText}
+              onCopyBatch={copyBatch}
             />
           )}
 
@@ -475,6 +515,8 @@ function ShortageView({
   onToggleAll,
   onDigikeyBatch,
   batchMsg,
+  batchText,
+  onCopyBatch,
 }: {
   report: ShortageReport;
   selected: Set<string>;
@@ -482,6 +524,8 @@ function ShortageView({
   onToggleAll: (checked: boolean) => void;
   onDigikeyBatch: () => void;
   batchMsg: string;
+  batchText: string;
+  onCopyBatch: () => void;
 }) {
   const allChecked = report.lines.length > 0 && report.lines.every((l) => selected.has(l.partKey));
   return (
@@ -568,6 +612,29 @@ function ShortageView({
             )}
             {batchMsg && <span className="text-sm text-black/60 dark:text-white/60">{batchMsg}</span>}
           </div>
+
+          {batchText && (
+            <div className="mb-4">
+              <div className="mb-1 flex items-center gap-2">
+                <span className="text-xs font-medium text-black/50 dark:text-white/50">
+                  Bulk-add list — paste into DigiKey&rsquo;s &ldquo;Add Multiple Parts&rdquo; (part,qty)
+                </span>
+                <button
+                  className="rounded border border-black/15 px-2 py-0.5 text-xs hover:bg-black/[0.03] dark:border-white/20 dark:hover:bg-white/[0.04]"
+                  onClick={onCopyBatch}
+                >
+                  Copy
+                </button>
+              </div>
+              <textarea
+                readOnly
+                className="h-28 w-full rounded-md border border-black/15 bg-transparent p-2 font-mono text-xs outline-none dark:border-white/20"
+                value={batchText}
+                onFocus={(e) => e.currentTarget.select()}
+              />
+            </div>
+          )}
+
           <div className="space-y-4">
             {BUCKETS.map(({ key, label }) => {
               const items = report.shortages.filter((s) => (s.bucket ?? "others") === key);
