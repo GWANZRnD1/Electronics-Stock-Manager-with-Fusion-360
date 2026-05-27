@@ -15,6 +15,12 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "invalid request" }, { status: 400 });
   }
-  const board = await createBoard(parsed.data);
+  const { board, created } = await createBoard(parsed.data);
+  if (!created) {
+    return NextResponse.json(
+      { error: `"${board.name}" already has a revision "${board.revision}".` },
+      { status: 409 },
+    );
+  }
   return NextResponse.json(board, { status: 201 });
 }

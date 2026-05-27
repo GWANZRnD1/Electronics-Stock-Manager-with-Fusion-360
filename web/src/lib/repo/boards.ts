@@ -9,9 +9,24 @@ export function listBoards() {
   return getDb().select().from(boards).orderBy(boards.name);
 }
 
-export async function createBoard(input: { name: string }) {
-  const [row] = await getDb().insert(boards).values({ name: input.name }).returning();
-  return row;
+/**
+ * Create a new board revision. (name + revision) must be unique — if that pair
+ * already exists we return it with `created: false` so the caller can report the
+ * clash instead of silently adding a duplicate.
+ */
+export async function createBoard(input: { name: string; revision: string }) {
+  const db = getDb();
+  const [existing] = await db
+    .select()
+    .from(boards)
+    .where(and(eq(boards.name, input.name), eq(boards.revision, input.revision)));
+  if (existing) return { board: existing, created: false };
+
+  const [row] = await db
+    .insert(boards)
+    .values({ name: input.name, revision: input.revision })
+    .returning();
+  return { board: row, created: true };
 }
 
 /**

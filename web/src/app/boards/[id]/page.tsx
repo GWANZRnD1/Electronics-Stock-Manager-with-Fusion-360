@@ -121,8 +121,19 @@ export default function BoardDetailPage() {
     setBatchMsg("");
     try {
       const rep = await jget<ShortageReport>(`/api/boards/${id}/shortage?count=${Number(count) || 0}`);
+      const keys = rep.lines.map((l) => l.partKey);
+      const prevKeys = new Set((report?.lines ?? []).map((l) => l.partKey));
       setReport(rep);
-      setSelected(new Set(rep.lines.map((l) => l.partKey))); // default: everything ticked
+      // First check: tick everything. Re-check: keep the user's ticks (drop lines
+      // that vanished), and tick only lines that are new since the last check — so
+      // unticking a part survives a re-check instead of snapping back to all.
+      setSelected((prev) => {
+        if (!report) return new Set(keys);
+        const keySet = new Set(keys);
+        const next = new Set([...prev].filter((k) => keySet.has(k)));
+        for (const k of keys) if (!prevKeys.has(k)) next.add(k);
+        return next;
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed.");
     } finally {
@@ -177,19 +188,38 @@ export default function BoardDetailPage() {
     setBusy(true);
     setBuildMsg("");
     try {
-      const r = await jpost<{ consumed: { mpn: string }[]; untracked: number }>(
-        `/api/boards/${id}/build`,
-        { quantity: qty, parts },
-      );
-      setBuildMsg(`Built ${qty} — consumed ${r.consumed.length} selected part type(s).`);
+      // Direct fetch (not jpost) so we can read the 409 body's `shortages` and
+      // name exactly which ticked parts blocked the build.
+      const res = await fetch(`/api/boards/${id}/build`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ quantity: qty, parts }),
+      });
+      if (res.status === 401) {
+        window.location.href = "/unlock";
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as {
+        consumed?: { mpn: string }[];
+        shortages?: { mpn: string; required: number; available: number }[];
+        error?: string;
+      };
+      if (res.status === 409 && data.shortages?.length) {
+        const list = data.shortages
+          .map((s) => `${s.mpn} (need ${s.required}, have ${s.available})`)
+          .join(", ");
+        setBuildMsg(`Not enough stock to build ${qty}: ${list}. Untick those or lower the count.`);
+        return;
+      }
+      if (!res.ok) {
+        setBuildMsg(data.error ?? "Build failed.");
+        return;
+      }
+      setBuildMsg(`Built ${qty} — consumed ${data.consumed?.length ?? 0} selected part type(s).`);
       await refreshBuilds();
       await check(); // re-run shortage to show updated stock
     } catch (e) {
-      if (e instanceof Error && e.message === "insufficient stock") {
-        setBuildMsg("Not enough stock for a ticked part — see the Short column.");
-      } else {
-        setBuildMsg(e instanceof Error ? e.message : "Build failed.");
-      }
+      setBuildMsg(e instanceof Error ? e.message : "Build failed.");
     } finally {
       setBusy(false);
     }

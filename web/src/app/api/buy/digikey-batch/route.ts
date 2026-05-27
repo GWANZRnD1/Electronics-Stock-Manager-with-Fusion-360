@@ -34,8 +34,13 @@ export async function POST(request: Request) {
     if (!res.ok) {
       return NextResponse.json({ error: `DigiKey responded ${res.status}` }, { status: 502 });
     }
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    const url = (data.singleUseUrl ?? data.SingleUseUrl) as string | undefined;
+    // DigiKey's third-party endpoint returns the single-use URL as a bare JSON
+    // string (e.g. "https://www.digikey.com/short/abc123"), not an object —
+    // though older responses wrapped it as { singleUseUrl }. Handle both.
+    const data = (await res.json().catch(() => null)) as unknown;
+    const wrapped = data as { singleUseUrl?: string; SingleUseUrl?: string } | null;
+    const url =
+      typeof data === "string" ? data : (wrapped?.singleUseUrl ?? wrapped?.SingleUseUrl);
     if (!url) {
       return NextResponse.json({ error: "DigiKey returned no URL" }, { status: 502 });
     }

@@ -2,8 +2,8 @@
  * Database client (Drizzle + postgres.js).
  *
  * Lazy singleton so importing this module never crashes when DATABASE_URL is
- * absent (e.g. during build). `prepare: false` is required for Neon's pooled
- * (PgBouncer) connection string — use the host containing "-pooler".
+ * absent (e.g. during build). `prepare: false` is required for Supabase's
+ * transaction-mode pooler (Supavisor) — the "*.pooler.supabase.com" host.
  */
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";

@@ -67,6 +67,7 @@ export const unlockSchema = z.object({
 
 export const createBoardSchema = z.object({
   name: z.string().trim().min(1).max(128),
+  revision: z.string().trim().min(1).max(64), // required: distinguishes revisions of the same board
 });
 
 export const updateBoardSchema = z

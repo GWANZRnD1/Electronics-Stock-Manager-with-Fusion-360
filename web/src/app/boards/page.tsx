@@ -107,6 +107,7 @@ export default function BoardsPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [boards, setBoards] = useState<Board[]>([]);
   const [name, setName] = useState("");
+  const [revision, setRevision] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   // Per-family selected revision (board id) and the single active inline edit.
@@ -141,8 +142,9 @@ export default function BoardsPage() {
     setBusy(true);
     setError("");
     try {
-      await jpost("/api/boards", { name: name.trim() });
+      await jpost("/api/boards", { name: name.trim(), revision: revision.trim() });
       setName("");
+      setRevision("");
       await reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed.");
@@ -159,6 +161,18 @@ export default function BoardsPage() {
     setError("");
     try {
       const payload = await readBomJson(file);
+      const rev = window.prompt(
+        "Revision for this import? (e.g. RevB, v1.2 — leave blank for none)\n" +
+          "Re-importing the same revision updates it; a different revision is kept as a new entry.",
+        "",
+      );
+      if (rev === null) {
+        setBusy(false);
+        return; // cancelled
+      }
+      if (payload && typeof payload === "object" && "board" in payload) {
+        (payload as { board: { revision?: string } }).board.revision = rev.trim();
+      }
       const res = await jpost<{ boardId: number; lines: number }>("/api/boards/import", payload);
       router.push(`/boards/${res.boardId}`); // open the board — its BOM loads on mount
     } catch (e) {
@@ -218,17 +232,23 @@ export default function BoardsPage() {
         )}
 
         <div className="mb-2 flex flex-wrap gap-2">
-          <form onSubmit={create} className="flex min-w-[16rem] flex-1 gap-2">
+          <form onSubmit={create} className="flex min-w-[16rem] flex-1 flex-wrap gap-2">
             <input
-              className="flex-1 rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20"
-              placeholder="New board name (e.g. Sensor Rev B)"
+              className="min-w-[10rem] flex-1 rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20"
+              placeholder="New board name (e.g. Sensor)"
               value={name}
               onChange={(e) => setName(e.target.value)}
+            />
+            <input
+              className="w-32 rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20"
+              placeholder="Revision"
+              value={revision}
+              onChange={(e) => setRevision(e.target.value)}
             />
             <button
               type="submit"
               className="rounded-md bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-              disabled={busy || !name.trim()}
+              disabled={busy || !name.trim() || !revision.trim()}
             >
               Create
             </button>
@@ -250,9 +270,9 @@ export default function BoardsPage() {
           />
         </div>
         <p className="mb-6 text-sm text-black/50 dark:text-white/50">
-          Import the <code>.json</code> from Fusion&rsquo;s <code>extract-bom.ulp</code> — it
-          creates (or updates) the board and opens it. Same name, different revision = a new
-          revision under that board.
+          Import the <code>.json</code> from Fusion&rsquo;s <code>extract-bom.ulp</code> — you&rsquo;ll
+          be asked for a revision, then it creates (or updates) that revision and opens it. Same
+          name, different revision = a new revision under that board.
         </p>
 
         {active.length === 0 ? (
@@ -362,35 +382,59 @@ export default function BoardsPage() {
               Archived ({archived.length})
             </summary>
             <ul className="divide-y divide-black/10 border-t border-black/10 dark:divide-white/10 dark:border-white/15">
-              {archived.map((fam) => (
-                <li
-                  key={fam.name}
-                  className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 text-sm"
-                >
-                  <span className="font-medium">{fam.name}</span>
-                  <span className="text-black/40 dark:text-white/40">
-                    {fam.revisions.length} revision(s)
-                  </span>
-                  <span className="ml-auto flex gap-2">
-                    <button
-                      className={btnSm}
-                      disabled={busy}
-                      onClick={() =>
-                        run(() => jpatch(`/api/boards/${fam.revisions[0].id}`, { archived: false }))
-                      }
-                    >
-                      Unarchive
-                    </button>
-                    <button
-                      className={`${btnSm} text-red-600 dark:text-red-400`}
-                      disabled={busy}
-                      onClick={() => removeFamily(fam)}
-                    >
-                      Delete
-                    </button>
-                  </span>
-                </li>
-              ))}
+              {archived.map((fam) => {
+                const sel = pickedBoard(fam);
+                return (
+                  <li
+                    key={fam.name}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 text-sm"
+                  >
+                    <Link href={`/boards/${sel.id}`} className="font-medium hover:underline">
+                      {fam.name}
+                    </Link>
+                    {fam.revisions.length > 1 ? (
+                      <select
+                        className={inputCls}
+                        value={sel.id}
+                        onChange={(e) =>
+                          setSelected((p) => ({ ...p, [fam.name]: Number(e.target.value) }))
+                        }
+                      >
+                        {fam.revisions.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.revision || "(no revision)"}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="text-black/40 dark:text-white/40">
+                        {sel.revision || "(no revision)"}
+                      </span>
+                    )}
+                    <span className="ml-auto flex gap-2">
+                      <Link href={`/boards/${sel.id}`} className={btnSm}>
+                        Open →
+                      </Link>
+                      <button
+                        className={btnSm}
+                        disabled={busy}
+                        onClick={() =>
+                          run(() => jpatch(`/api/boards/${fam.revisions[0].id}`, { archived: false }))
+                        }
+                      >
+                        Unarchive
+                      </button>
+                      <button
+                        className={`${btnSm} text-red-600 dark:text-red-400`}
+                        disabled={busy}
+                        onClick={() => removeFamily(fam)}
+                      >
+                        Delete
+                      </button>
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           </details>
         )}
