@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Nav } from "@/components/Nav";
 import { jget, jpatch, jpost, jpostText } from "@/lib/client";
@@ -314,12 +314,107 @@ export default function Home() {
   );
 }
 
+/**
+ * Horizontally scrollable container that a mouse user can actually drive: click
+ * and drag to scroll sideways (grab cursor), with fade shadows marking hidden
+ * content. Shift+wheel and the native scrollbar still work; touch uses native
+ * scrolling. Drags starting on a button/input are ignored so controls still click.
+ */
+function HScroll({
+  children,
+  onScrollableChange,
+}: {
+  children: React.ReactNode;
+  onScrollableChange?: (scrollable: boolean) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ startX: number; startLeft: number } | null>(null);
+  const moved = useRef(false);
+  const [shadow, setShadow] = useState({ left: false, right: false });
+  const [grabbing, setGrabbing] = useState(false);
+
+  function update() {
+    const el = ref.current;
+    if (!el) return;
+    const left = el.scrollLeft > 1;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    setShadow({ left, right });
+    onScrollableChange?.(left || right);
+  }
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function onPointerDown(e: React.PointerEvent) {
+    if (e.pointerType !== "mouse") return; // touch/pen scroll natively
+    if ((e.target as HTMLElement).closest("button, a, input, select, textarea")) return;
+    drag.current = { startX: e.clientX, startLeft: ref.current?.scrollLeft ?? 0 };
+    moved.current = false;
+  }
+  function onPointerMove(e: React.PointerEvent) {
+    const el = ref.current;
+    if (!drag.current || !el) return;
+    const dx = e.clientX - drag.current.startX;
+    if (!moved.current && Math.abs(dx) < 5) return; // threshold so clicks still register
+    moved.current = true;
+    setGrabbing(true);
+    el.setPointerCapture(e.pointerId);
+    el.scrollLeft = drag.current.startLeft - dx;
+    e.preventDefault();
+  }
+  function endDrag(e: React.PointerEvent) {
+    if (drag.current && moved.current) {
+      try {
+        ref.current?.releasePointerCapture(e.pointerId);
+      } catch {
+        /* capture may not be set */
+      }
+    }
+    drag.current = null;
+    moved.current = false;
+    setGrabbing(false);
+  }
+
+  const scrollable = shadow.left || shadow.right;
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-black/10 dark:border-white/15">
+      <div
+        ref={ref}
+        onScroll={update}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerLeave={endDrag}
+        className={`overflow-x-auto ${scrollable ? (grabbing ? "cursor-grabbing select-none" : "cursor-grab") : ""}`}
+      >
+        {children}
+      </div>
+      {shadow.left && (
+        <div className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-black/15 to-transparent dark:from-black/50" />
+      )}
+      {shadow.right && (
+        <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/15 to-transparent dark:from-black/50" />
+      )}
+    </div>
+  );
+}
+
 function InventoryTable({ rows, onEdit }: { rows: CatalogRow[]; onEdit: (r: CatalogRow) => void }) {
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [scrollable, setScrollable] = useState(false);
   const cols = 12;
   return (
-    <div className="overflow-x-auto rounded-xl border border-black/10 dark:border-white/15">
-      <table className="w-full text-left text-sm">
+    <>
+      <HScroll onScrollableChange={setScrollable}>
+        <table className="w-full min-w-[72rem] text-left text-sm">
         <thead className="text-black/50 dark:text-white/50">
           <tr className="border-b border-black/10 dark:border-white/15">
             <th className="w-6 px-2 py-2" />
@@ -358,7 +453,13 @@ function InventoryTable({ rows, onEdit }: { rows: CatalogRow[]; onEdit: (r: Cata
           )}
         </tbody>
       </table>
-    </div>
+      </HScroll>
+      {scrollable && (
+        <p className="mt-1.5 text-xs text-black/45 dark:text-white/45">
+          ↔ Drag the table sideways, or hold Shift while scrolling, to see all columns.
+        </p>
+      )}
+    </>
   );
 }
 
