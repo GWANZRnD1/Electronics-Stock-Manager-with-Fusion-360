@@ -48,6 +48,32 @@ const ECIA_HEADERS = [
   "[)>06",
 ];
 
+/**
+ * Choose the correct text for a scanned 2D code from its raw bytes. A scanner
+ * library's rendered text can drop the ECIA control separators (GS/RS/EOT) and
+ * guess the wrong charset for non-Latin payloads, so decode the bytes here:
+ * ECIA / MH10.8.2 labels (ASCII + control chars, identified by the `[)>`
+ * header) are read as Latin-1 to preserve every byte; everything else is read
+ * as UTF-8, then GBK (LCSC packs Chinese product names), then `fallbackText`.
+ */
+export function decodeScannedBytes(
+  bytes: Uint8Array | null | undefined,
+  fallbackText = "",
+): string {
+  if (!bytes || bytes.length === 0) return fallbackText;
+  const latin1 = new TextDecoder("iso-8859-1").decode(bytes);
+  if (latin1.includes("[)>")) return latin1;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    try {
+      return new TextDecoder("gbk").decode(bytes);
+    } catch {
+      return fallbackText || latin1;
+    }
+  }
+}
+
 export function parseLabel(raw: string | null | undefined): ScannedLabel {
   if (raw == null) throw new Error("raw label is required");
   const text = raw.trim();

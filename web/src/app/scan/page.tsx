@@ -5,7 +5,7 @@ import type { ReaderOptions } from "zxing-wasm/reader";
 
 import { Nav } from "@/components/Nav";
 import { jget, jpost } from "@/lib/client";
-import { parseLabel } from "@/lib/domain/barcode";
+import { decodeScannedBytes, parseLabel } from "@/lib/domain/barcode";
 
 interface Location {
   id: number;
@@ -69,6 +69,7 @@ export default function ScanPage() {
   const [zoomRange, setZoomRange] = useState<{ min: number; max: number; step: number } | null>(null);
   const [zoom, setZoom] = useState(0);
   const [hint, setHint] = useState("");
+  const [rawText, setRawText] = useState(""); // exact decoded payload (debug/verify)
   const [locations, setLocations] = useState<Location[]>([]);
   const [mpn, setMpn] = useState("");
   const [qty, setQty] = useState("");
@@ -134,6 +135,7 @@ export default function ScanPage() {
   }, [mpn]);
 
   function applyRaw(raw: string) {
+    setRawText(raw);
     try {
       const label = parseLabel(raw);
       setMpn(label.mpn ?? label.distributorPart ?? "");
@@ -167,7 +169,8 @@ export default function ScanPage() {
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, w, h);
     const results = await reader.readBarcodes(ctx.getImageData(0, 0, w, h), READER_OPTIONS);
-    return results.find((r) => r.text)?.text ?? null;
+    const hit = results.find((r) => r.bytes?.length || r.text);
+    return hit ? decodeScannedBytes(hit.bytes, hit.text) : null;
   }
 
   async function scanLoop() {
@@ -329,7 +332,10 @@ export default function ScanPage() {
       if (track && w.ImageCapture) {
         try {
           const blob = await new w.ImageCapture(track).takePhoto();
-          text = (await reader.readBarcodes(blob, READER_OPTIONS)).find((r) => r.text)?.text ?? null;
+          const hit = (await reader.readBarcodes(blob, READER_OPTIONS)).find(
+            (r) => r.bytes?.length || r.text,
+          );
+          text = hit ? decodeScannedBytes(hit.bytes, hit.text) : null;
         } catch {
           /* ImageCapture not usable here — fall back to a video frame */
         }
@@ -387,6 +393,7 @@ export default function ScanPage() {
       setMpn("");
       setQty("");
       setScanInfo("");
+      setRawText("");
       setManufacturer("");
       setName("");
       setCategory("");
@@ -500,6 +507,11 @@ export default function ScanPage() {
           <h2 className="font-medium">Receive</h2>
           {scanInfo && (
             <p className="text-sm text-black/60 dark:text-white/60">Scanned: {scanInfo}</p>
+          )}
+          {rawText && (
+            <p className="select-all break-all rounded bg-black/5 px-2 py-1 font-mono text-[10px] text-black/50 dark:bg-white/5 dark:text-white/50">
+              {rawText}
+            </p>
           )}
           <input
             className={inputClass}

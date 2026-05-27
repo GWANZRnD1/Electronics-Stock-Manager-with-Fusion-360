@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { EOT, GS, RS, parseLabel } from "./barcode";
+import { EOT, GS, RS, decodeScannedBytes, parseLabel } from "./barcode";
 
 function ecia(...fields: string[]): string {
   return `[)>${RS}06${GS}` + fields.join(GS) + RS + EOT;
+}
+
+/** 1 byte → 1 char, for ASCII/control payloads (DataMatrix). */
+function latin1Bytes(s: string): Uint8Array {
+  return Uint8Array.from(s, (c) => c.charCodeAt(0));
 }
 
 describe("parseLabel", () => {
@@ -74,5 +79,39 @@ describe("parseLabel", () => {
 
     expect(label.mpn).toBe("ABC123");
     expect(label.quantity).toBeNull();
+  });
+});
+
+describe("decodeScannedBytes", () => {
+  it("returns the fallback when there are no bytes", () => {
+    expect(decodeScannedBytes(undefined, "fallback")).toBe("fallback");
+    expect(decodeScannedBytes(new Uint8Array(), "fallback")).toBe("fallback");
+  });
+
+  it("preserves ECIA control separators by decoding Latin-1 from bytes", () => {
+    // The reader's rendered text dropped the GS/RS separators; bytes keep them.
+    const raw = ecia("PMCP2221A-I/SL-ND", "1PMCP2221A-I/SL", "Q10");
+    const decoded = decodeScannedBytes(latin1Bytes(raw), "MCP2221A-I/SL Q10");
+
+    expect(decoded).toBe(raw);
+    const label = parseLabel(decoded);
+    expect(label.distributor).toBe("digikey");
+    expect(label.mpn).toBe("MCP2221A-I/SL");
+    expect(label.quantity).toBe(10);
+  });
+
+  it("decodes a UTF-8 LCSC payload (Chinese product name)", () => {
+    const s = "{pc:C123456,pm:电阻 100mm,qty:5}";
+    const utf8 = new TextEncoder().encode(s);
+
+    const decoded = decodeScannedBytes(utf8);
+    expect(decoded).toBe(s);
+    expect(parseLabel(decoded).quantity).toBe(5);
+  });
+
+  it("decodes GBK bytes that aren't valid UTF-8", () => {
+    // "中" is 0xD6 0xD0 in GBK and not valid UTF-8, so it must use the GBK path.
+    const bytes = new Uint8Array([0x7b, 0xd6, 0xd0, 0x7d]); // { 中 }
+    expect(decodeScannedBytes(bytes)).toBe("{中}");
   });
 });
