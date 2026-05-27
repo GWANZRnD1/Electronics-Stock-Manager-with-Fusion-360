@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 
 import {
+  type BuyBucket,
   buyBucket,
   digikeySearchUrl,
+  isJellybeanDescriptor,
   lcscSearchUrl,
   mouserProductUrl,
 } from "@/lib/domain/buyLinks";
@@ -43,16 +45,23 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   const report = await getBoardShortage(boardId, count);
   const short = report.lines.filter((l) => l.shortage > 0);
 
-  // Route each shortage to a buy distributor by its catalog `supplier`.
+  // Route each shortage to a buy distributor: a matched catalog part goes by its
+  // `supplier`; an unmatched line that *looks* like a jellybean passive/LED falls
+  // to DigiKey (so caps/resistors/LEDs don't all land in Others); anything else
+  // is Others.
   const suppliers = await suppliersByMpns(short.filter((l) => isMpn(l.partKey)).map((l) => l.partKey));
   const shortages = short.map((l) => {
     const supplier = isMpn(l.partKey) ? (suppliers[l.partKey] ?? "") : "";
-    return {
-      ...l,
-      supplier,
-      bucket: isMpn(l.partKey) ? buyBucket(supplier) : "others",
-      buyLinks: buyLinksFor(l),
-    };
+    const buyLinks = buyLinksFor(l);
+    let bucket: BuyBucket;
+    if (supplier) {
+      bucket = buyBucket(supplier);
+    } else if (buyLinks && isJellybeanDescriptor(`${l.partKey} ${l.reference}`)) {
+      bucket = "digikey";
+    } else {
+      bucket = "others";
+    }
+    return { ...l, supplier, bucket, buyLinks };
   });
 
   return NextResponse.json({

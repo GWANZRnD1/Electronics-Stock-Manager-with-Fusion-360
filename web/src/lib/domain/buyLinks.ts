@@ -29,6 +29,26 @@ export function buyBucket(supplier: string | null | undefined): BuyBucket {
   }
 }
 
+// Common jellybean passives/discretes, recognized from a free-text part
+// descriptor (used as a fallback for BOM lines that don't match a catalog part,
+// so they still route to DigiKey instead of Others). Both µ (U+00B5) and μ
+// (U+03BC) are accepted for "micro".
+const JELLYBEAN_PATTERNS: RegExp[] = [
+  /\d\s*[pnµμu]f\b/i, // capacitance: 100pF, 0.1 µF, 10uF, 100nF
+  /\b(?:x5r|x7r|x6s|x8r|c0g|np0|y5v|z5u)\b/i, // ceramic dielectric codes → capacitor
+  /\b\d+(?:\.\d+)?\s*[kmµμ]?\s*(?:ohm|Ω)/i, // resistance stated in ohms / Ω (Ω isn't a \w char, so no trailing \b)
+  /\b\d+(?:\.\d+)?[km]\b/i, // resistor value shorthand: 10k, 4.7k, 1M
+  /\b\d+[rk]\d+\b/i, // resistor code shorthand: 4k7, 1r0, 10k0
+  /\d\s*[pnµμum]h\b/i, // inductance: 10µH, 100nH, 1mH
+  /\bled\b/i, // LEDs
+  /\b(?:ferrite|bead)\b/i, // ferrite beads
+];
+
+/** True when a free-text part descriptor looks like a jellybean passive/LED. */
+export function isJellybeanDescriptor(text: string): boolean {
+  return JELLYBEAN_PATTERNS.some((re) => re.test(text));
+}
+
 export interface MyListsItem {
   requestedPartNumber: string;
   quantities: { quantity: number }[];

@@ -4,6 +4,7 @@ import {
   buyBucket,
   digikeyMylistsPayload,
   digikeySearchUrl,
+  isJellybeanDescriptor,
   lcscProductUrl,
   lcscSearchUrl,
   mouserProductUrl,
@@ -70,5 +71,25 @@ describe("buyBucket", () => {
     expect(buyBucket(null)).toBe("others");
     expect(buyBucket(undefined)).toBe("others");
     expect(buyBucket("Arrow")).toBe("others");
+  });
+});
+
+describe("isJellybeanDescriptor", () => {
+  it("recognizes capacitors, LEDs, resistors, and inductors", () => {
+    expect(isJellybeanDescriptor("0.1 μF 25V X5R 0402 (1005 Metric)")).toBe(true); // Greek mu
+    expect(isJellybeanDescriptor("0.1 µF 50V X7R 0603 (1608 Metric)")).toBe(true); // micro sign
+    expect(isJellybeanDescriptor("10 μF 25V X5R 0603 (1608 Metric)")).toBe(true);
+    expect(isJellybeanDescriptor("RED LED 0603(1608METRIC)")).toBe(true);
+    expect(isJellybeanDescriptor("10k 1% 0402")).toBe(true);
+    expect(isJellybeanDescriptor("4k7 0603")).toBe(true);
+    expect(isJellybeanDescriptor("100 Ω 0805")).toBe(true);
+    expect(isJellybeanDescriptor("10 µH 1A")).toBe(true);
+  });
+
+  it("does not flag connectors, debug headers, or synthetic keys", () => {
+    expect(isJellybeanDescriptor("PINHD-1X1|1X01")).toBe(false);
+    expect(isJellybeanDescriptor("TAG-CONNECT_TC2030-IDC-NL")).toBe(false);
+    expect(isJellybeanDescriptor("line-451")).toBe(false);
+    expect(isJellybeanDescriptor("MCP2221A-I/SL SOIC-14")).toBe(false);
   });
 });
