@@ -2,7 +2,7 @@
  * Inventory data access. Stock is always changed by appending an inventory_txns
  * row; stock_items.quantity is kept as the running total via an upsert.
  */
-import { and, eq, ilike, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, ilike, inArray, ne, or, sql, type SQL } from "drizzle-orm";
 import type { PgColumn } from "drizzle-orm/pg-core";
 
 import { getDb } from "@/lib/db";
@@ -44,6 +44,33 @@ function categoryKeySql(col: PgColumn): SQL<string> {
 
 export function listParts(limit = 200) {
   return getDb().select().from(parts).orderBy(parts.mpn).limit(limit);
+}
+
+/**
+ * Catalog parts matching any of the given MPNs or supplier part numbers — the
+ * DB-first lookup for library enrichment (so we only call distributor APIs for
+ * parts not already known). Blank keys are ignored.
+ */
+export async function partsByKeys(mpns: string[], spns: string[]) {
+  const m = [...new Set(mpns.map((s) => s.trim()).filter(Boolean))];
+  const s = [...new Set(spns.map((x) => x.trim()).filter(Boolean))];
+  const conds: SQL[] = [];
+  if (m.length) conds.push(inArray(parts.mpn, m));
+  if (s.length) conds.push(inArray(parts.spn, s));
+  if (conds.length === 0) return [];
+  return getDb()
+    .select({
+      mpn: parts.mpn,
+      spn: parts.spn,
+      manufacturer: parts.manufacturer,
+      description: parts.description,
+      category: parts.category,
+      value: parts.value,
+      package: parts.package,
+      supplier: parts.supplier,
+    })
+    .from(parts)
+    .where(conds.length === 1 ? conds[0] : or(...conds));
 }
 
 export async function createPart(input: PartFields & { mpn: string }) {

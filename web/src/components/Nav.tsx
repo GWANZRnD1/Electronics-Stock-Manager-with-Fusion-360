@@ -8,6 +8,7 @@ const LINKS = [
   { href: "/scan", label: "Scan" },
   { href: "/boards", label: "Boards" },
   { href: "/lookup", label: "Lookup" },
+  { href: "/library", label: "Library" },
   { href: "/settings", label: "Settings" },
 ];
 

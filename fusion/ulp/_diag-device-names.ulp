@@ -1,0 +1,43 @@
+#usage "en: <b>Diagnostic</b> - dumps the real deviceset / variant / package / "
+       "technology / attribute names of the first few devicesets so we can craft "
+       "the correct PACKAGE/TECHNOLOGY commands. Run from the Library editor. "
+       "Changes nothing.\n"
+
+// Read-only. Prints structure for the first MAX_DS devicesets, then stops.
+int MAX_DS = 5;
+
+if (!library) {
+  dlgMessageBox("Run this from the Library editor (it inspects the open library).");
+  exit(0);
+}
+
+string s = "";
+int n = 0;
+
+library(L) {
+  L.devicesets(DS) {
+    if (n < MAX_DS) {
+      string line;
+      sprintf(line, "DEVICESET name='%s'\n", DS.name);
+      s += line;
+      DS.devices(D) {
+        sprintf(line, "  DEVICE: D.name='%s'  package='%s'  technologies='%s'\n",
+                D.name, D.package.name, D.technologies);
+        s += line;
+        // attributes for the (possibly empty) first technology token
+        string techs[];
+        int nt = strsplit(techs, D.technologies, ' ');
+        if (nt == 0) { techs[0] = ""; nt = 1; }
+        D.attributes(A, techs[0]) {
+          sprintf(line, "      attr '%s' = '%s'\n", A.name, A.value);
+          s += line;
+        }
+      }
+      n++;
+    }
+  }
+}
+
+string msg;
+sprintf(msg, "Structure (first %d devicesets):\n\n%s", n, s);
+dlgMessageBox(msg);

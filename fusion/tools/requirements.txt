@@ -1,0 +1,3 @@
+# Only the GUI (fusion_attr_gui.py) needs a dependency. The CLI
+# (fusion_attr_editor.py) is standard-library only.
+tksheet>=7,<8
