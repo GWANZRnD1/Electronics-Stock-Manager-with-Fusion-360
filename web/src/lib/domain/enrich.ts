@@ -23,8 +23,11 @@ export function deriveValue(offers: DistributorOffer[], fallbackDescription: str
   return extractValue(fallbackDescription);
 }
 
-/** First non-empty field across live offers — used to backfill blank category/package. */
-export function deriveField(offers: DistributorOffer[], field: "category" | "package"): string {
+/** First non-empty field across live offers — used to backfill blank metadata. */
+export function deriveField(
+  offers: DistributorOffer[],
+  field: "category" | "package" | "manufacturer" | "description",
+): string {
   for (const o of offers) {
     if (!o.mock && o[field]?.trim()) return o[field].trim();
   }

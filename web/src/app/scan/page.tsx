@@ -103,6 +103,17 @@ export default function ScanPage() {
   async function start() {
     setError("");
     setMsg("");
+    // getUserMedia only exists in a secure context. Over plain HTTP on a LAN IP
+    // (e.g. a phone hitting the dev server) navigator.mediaDevices is undefined,
+    // so scanning fails before the reader even loads. Detect that up front.
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      setError(
+        window.isSecureContext
+          ? "This browser doesn't expose a camera API. Try Chrome or Safari."
+          : "Camera needs a secure (HTTPS) connection. You're on plain HTTP — a phone on the LAN can't use the camera over http://. Open the app via localhost, deploy over HTTPS, or run the dev server with `npm run dev:https`.",
+      );
+      return;
+    }
     try {
       const { BrowserMultiFormatReader } = await import("@zxing/browser");
       const { BarcodeFormat, DecodeHintType } = await import("@zxing/library");
@@ -122,9 +133,15 @@ export default function ScanPage() {
       );
     } catch (e) {
       setScanning(false);
-      setError(
-        e instanceof Error ? `Camera error: ${e.message}` : "Camera unavailable (needs HTTPS).",
-      );
+      const detail =
+        e instanceof DOMException && e.name === "NotAllowedError"
+          ? "permission denied — allow camera access in your browser settings."
+          : e instanceof DOMException && e.name === "NotFoundError"
+            ? "no camera found on this device."
+            : e instanceof Error
+              ? e.message
+              : "unknown error.";
+      setError(`Camera error: ${detail}`);
     }
   }
 

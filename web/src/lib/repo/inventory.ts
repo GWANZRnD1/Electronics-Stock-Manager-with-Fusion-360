@@ -2,7 +2,7 @@
  * Inventory data access. Stock is always changed by appending an inventory_txns
  * row; stock_items.quantity is kept as the running total via an upsert.
  */
-import { and, eq, ilike, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, ilike, ne, or, sql, type SQL } from "drizzle-orm";
 import type { PgColumn } from "drizzle-orm/pg-core";
 
 import { getDb } from "@/lib/db";
@@ -523,18 +523,31 @@ export async function importInventory(rows: NormalizedRow[]): Promise<ImportResu
 const hasLookupKey = sql`(${parts.mpn} <> '' OR ${parts.spn} <> '')`;
 const apiSupplier = sql`lower(${parts.supplier}) in ('digikey', 'mouser')`;
 
+// Parts a "fill missing details" pass could enrich: a non-jellybean part with a
+// lookup key that is missing at least one fillable field. The MPN can only be
+// filled for DigiKey/Mouser parts (SPN → MPN), so it's gated on apiSupplier.
+const fillEligible = and(
+  sql`lower(${parts.supplier}) <> 'jellybean'`,
+  hasLookupKey,
+  or(
+    eq(parts.value, ""),
+    eq(parts.category, ""),
+    eq(parts.package, ""),
+    eq(parts.manufacturer, ""),
+    eq(parts.description, ""),
+    and(apiSupplier, eq(parts.mpn, "")),
+  ),
+);
+
 export interface SyncCounts {
-  values: number; // parts missing a value that a lookup could fill
+  values: number; // parts missing details a lookup could fill
   costs: number; // DigiKey/Mouser parts whose unit cost could be refreshed
 }
 
 /** Counts for the distributor-sync panel (how many parts each operation would touch). */
 export async function syncCounts(): Promise<SyncCounts> {
   const db = getDb();
-  const [v] = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(parts)
-    .where(and(eq(parts.value, ""), sql`lower(${parts.supplier}) <> 'jellybean'`, hasLookupKey));
+  const [v] = await db.select({ n: sql<number>`count(*)` }).from(parts).where(fillEligible);
   const [c] = await db
     .select({ n: sql<number>`count(*)` })
     .from(parts)
@@ -551,13 +564,15 @@ export interface SyncBatchResult {
 /**
  * One resumable batch of distributor sync, combining two opt-in operations behind
  * a single lookup per part:
- *  - `fillValues`: fill a blank component value (plus blank category/package) for
- *    non-jellybean parts.
+ *  - `fillValues`: backfill any blank detail (value, category, package, manufacturer,
+ *    description) for non-jellybean parts, and — for DigiKey/Mouser parts with a blank
+ *    MPN — fill the MPN from the supplier part number (SPN → MPN).
  *  - `refreshCosts`: overwrite unit cost (USD) for DigiKey/Mouser parts.
  * The lookup key prefers the supplier part number for DigiKey/Mouser (a precise
  * match), else the MPN — so a part with only an SPN can still be enriched. Sweeps
- * by ascending id and throttles between parts to respect rate limits; cost is only
- * overwritten when a USD price is found, so a failed lookup never wipes data.
+ * by ascending id and throttles between parts to respect rate limits; fields are
+ * only written when a live (non-mock) lookup yields data, so a failed/mock lookup
+ * never wipes data. Per-part progress is logged so silent no-ops are diagnosable.
  */
 export async function syncFromDistributors(
   opts: {
@@ -576,9 +591,7 @@ export async function syncFromDistributors(
   if (!fillValues && !refreshCosts) return { processed: 0, updated: 0, nextAfterId: null };
 
   const clauses = [];
-  if (fillValues) {
-    clauses.push(and(eq(parts.value, ""), sql`lower(${parts.supplier}) <> 'jellybean'`, hasLookupKey));
-  }
+  if (fillValues) clauses.push(fillEligible);
   if (refreshCosts) clauses.push(and(apiSupplier, hasLookupKey));
   const eligible = clauses.length === 1 ? clauses[0] : or(...clauses);
 
@@ -593,6 +606,7 @@ export async function syncFromDistributors(
       description: parts.description,
       category: parts.category,
       package: parts.package,
+      manufacturer: parts.manufacturer,
     })
     .from(parts)
     .where(and(eligible, sql`${parts.id} > ${afterId}`))
@@ -610,21 +624,56 @@ export async function syncFromDistributors(
     let offers;
     try {
       ({ offers } = await lookupPart(key));
-    } catch {
+    } catch (e) {
+      console.warn(`[sync] part ${t.id} (${key}): lookup failed —`, e instanceof Error ? e.message : e);
       continue; // transient error — a later sweep retries
     }
 
+    const live = offers.filter((o) => !o.mock);
+    if (live.length === 0 && isApi) {
+      console.warn(
+        `[sync] part ${t.id} (${key}): DigiKey/Mouser returned no live data (mock only) — check API keys / DIGIKEY_USE_SANDBOX=false`,
+      );
+    }
+
     const patch: Partial<typeof parts.$inferInsert> = {};
-    if (fillValues && t.value === "" && supplier !== "jellybean") {
-      const value = deriveValue(offers, t.description);
-      if (value) patch.value = value;
-      if (!t.category) {
+    if (fillValues && supplier !== "jellybean") {
+      if (t.value === "") {
+        const value = deriveValue(offers, t.description); // can extract from the part's own description
+        if (value) patch.value = value;
+      }
+      if (t.category === "") {
         const c = deriveField(offers, "category");
         if (c) patch.category = c;
       }
-      if (!t.package) {
+      if (t.package === "") {
         const p = deriveField(offers, "package");
         if (p) patch.package = p;
+      }
+      if (t.manufacturer === "") {
+        const m = deriveField(offers, "manufacturer");
+        if (m) patch.manufacturer = m;
+      }
+      if (t.description === "") {
+        const d = deriveField(offers, "description");
+        if (d) patch.description = d;
+      }
+      // SPN → MPN: fill a blank MPN from the distributor's own offer, guarding the
+      // partial unique index — skip (don't crash the batch) if another part owns it.
+      if (isApi && t.mpn === "") {
+        const candidate = (live.find((o) => o.distributor === supplier) ?? live[0])?.mpn?.trim() ?? "";
+        if (candidate) {
+          const [clash] = await db
+            .select({ id: parts.id })
+            .from(parts)
+            .where(and(eq(parts.mpn, candidate), ne(parts.id, t.id)))
+            .limit(1);
+          if (clash) {
+            console.warn(`[sync] part ${t.id} (${key}): MPN ${candidate} already used by part ${clash.id} — skipped`);
+          } else {
+            patch.mpn = candidate;
+          }
+        }
       }
     }
     if (refreshCosts && isApi) {
@@ -633,8 +682,13 @@ export async function syncFromDistributors(
       if (cost !== null) patch.unitCost = money(cost);
     }
     if (Object.keys(patch).length > 0) {
-      await db.update(parts).set({ ...patch, updatedAt: sql`now()` }).where(eq(parts.id, t.id));
-      updated++;
+      try {
+        await db.update(parts).set({ ...patch, updatedAt: sql`now()` }).where(eq(parts.id, t.id));
+        updated++;
+        console.log(`[sync] part ${t.id} (${key}): filled ${Object.keys(patch).join(", ")}`);
+      } catch (e) {
+        console.warn(`[sync] part ${t.id} (${key}): update failed —`, e instanceof Error ? e.message : e);
+      }
     }
     if (i < targets.length - 1) await sleep(delayMs);
   }

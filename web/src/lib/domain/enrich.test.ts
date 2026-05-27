@@ -52,6 +52,12 @@ describe("deriveField", () => {
     expect(deriveField([offer({ package: "0402" })], "package")).toBe("0402");
     expect(deriveField([offer({})], "category")).toBe("");
   });
+
+  it("backfills manufacturer and description from live offers", () => {
+    expect(deriveField([offer({ manufacturer: "Yageo" })], "manufacturer")).toBe("Yageo");
+    expect(deriveField([offer({ description: "RES 10K 0402" })], "description")).toBe("RES 10K 0402");
+    expect(deriveField([offer({ mock: true, manufacturer: "Yageo" })], "manufacturer")).toBe("");
+  });
 });
 
 describe("unitCostFromOffer", () => {

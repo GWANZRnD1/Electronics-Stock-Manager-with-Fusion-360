@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Nav } from "@/components/Nav";
-import { jget, jpatch, jpost, jpostText } from "@/lib/client";
+import { Modal, btn, inputClass } from "@/components/ui";
+import { jget, jpatch, jpost } from "@/lib/client";
 
 interface CatalogRow {
   id: number;
@@ -66,9 +67,6 @@ const EMPTY: Filters = {
   location: "",
 };
 
-const inputClass =
-  "w-full rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20";
-
 function buildQuery(f: Filters): string {
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(f)) {
@@ -88,15 +86,14 @@ function fmtDate(iso: string | null): string {
 }
 
 export default function Home() {
-  const [view, setView] = useState<"inventory" | "summary" | "settings">("inventory");
+  const [view, setView] = useState<"inventory" | "summary">("inventory");
   const [filters, setFilters] = useState<Filters>(EMPTY);
-  const [advanced, setAdvanced] = useState(false);
   const [rows, setRows] = useState<CatalogRow[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [fabOpen, setFabOpen] = useState(false);
-  const [modal, setModal] = useState<"part" | "location" | "import" | null>(null);
+  const [modal, setModal] = useState<"part" | "location" | null>(null);
   const [editing, setEditing] = useState<CatalogRow | null>(null);
 
   useEffect(() => {
@@ -154,57 +151,41 @@ export default function Home() {
             >
               Summary
             </button>
-            <button
-              className={`rounded-md px-3 py-1 ${view === "settings" ? "bg-blue-600 text-white" : "text-black/60 dark:text-white/60"}`}
-              onClick={() => setView("settings")}
-            >
-              Settings
-            </button>
           </div>
         </div>
 
         {view === "summary" ? (
           <SummaryView refreshKey={refreshKey} />
-        ) : view === "settings" ? (
-          <SettingsView onOpenImport={() => setModal("import")} />
         ) : (
           <>
-            <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="mb-3">
               <input
                 className={inputClass}
                 placeholder="Search MPN, SPN, name, manufacturer, category, size…"
                 value={filters.q}
                 onChange={set("q")}
               />
-              <button
-                className="shrink-0 text-sm text-blue-600 hover:underline dark:text-blue-400"
-                onClick={() => setAdvanced((a) => !a)}
-              >
-                {advanced ? "Hide" : "Advanced"}
-              </button>
             </div>
 
-            {advanced && (
-              <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-                <select
-                  className={inputClass}
-                  value={filters.category}
-                  onChange={(e) => setFilters((f) => ({ ...f, category: e.target.value }))}
-                >
-                  <option value="">All categories</option>
-                  {categories.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-                <input className={inputClass} placeholder="Name" value={filters.name} onChange={set("name")} />
-                <input className={inputClass} placeholder="Manufacturer" value={filters.manufacturer} onChange={set("manufacturer")} />
-                <input className={inputClass} placeholder="MPN" value={filters.mpn} onChange={set("mpn")} />
-                <input className={inputClass} placeholder="Size (0603, TH…)" value={filters.package} onChange={set("package")} />
-                <input className={inputClass} placeholder="Location" value={filters.location} onChange={set("location")} />
-              </div>
-            )}
+            <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+              <select
+                className={inputClass}
+                value={filters.category}
+                onChange={(e) => setFilters((f) => ({ ...f, category: e.target.value }))}
+              >
+                <option value="">All categories</option>
+                {categories.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+              <input className={inputClass} placeholder="Name" value={filters.name} onChange={set("name")} />
+              <input className={inputClass} placeholder="Manufacturer" value={filters.manufacturer} onChange={set("manufacturer")} />
+              <input className={inputClass} placeholder="MPN" value={filters.mpn} onChange={set("mpn")} />
+              <input className={inputClass} placeholder="Size (0603, TH…)" value={filters.package} onChange={set("package")} />
+              <input className={inputClass} placeholder="Location" value={filters.location} onChange={set("location")} />
+            </div>
 
             {error && (
               <p className="mb-3 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
@@ -265,24 +246,16 @@ export default function Home() {
           }}
         />
       )}
-      {modal === "import" && (
-        <ImportModal
-          onClose={() => setModal(null)}
-          onDone={() => {
-            setModal(null);
-            refresh();
-          }}
-        />
-      )}
     </>
   );
 }
 
 /**
- * Horizontally scrollable container that a mouse user can actually drive: click
- * and drag to scroll sideways (grab cursor), with fade shadows marking hidden
- * content. Shift+wheel and the native scrollbar still work; touch uses native
- * scrolling. Drags starting on a button/input are ignored so controls still click.
+ * Horizontally scrollable container a plain mouse can drive: a vertical mouse
+ * wheel scrolls it sideways (at the horizontal edges the wheel falls back to
+ * scrolling the page). Shift+wheel, trackpad swipes, and the native scrollbar
+ * all still work, and — unlike drag-to-scroll — text stays selectable. Fade
+ * shadows mark hidden content.
  */
 function HScroll({
   children,
@@ -292,10 +265,7 @@ function HScroll({
   onScrollableChange?: (scrollable: boolean) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const drag = useRef<{ startX: number; startLeft: number } | null>(null);
-  const moved = useRef(false);
   const [shadow, setShadow] = useState({ left: false, right: false });
-  const [grabbing, setGrabbing] = useState(false);
 
   function update() {
     const el = ref.current;
@@ -313,52 +283,30 @@ function HScroll({
     const ro = new ResizeObserver(update);
     ro.observe(el);
     if (el.firstElementChild) ro.observe(el.firstElementChild);
-    return () => ro.disconnect();
+
+    // Translate a vertical mouse wheel into horizontal scrolling. Needs a
+    // non-passive listener so preventDefault works (React's onWheel is passive).
+    function onWheel(e: WheelEvent) {
+      if (e.shiftKey) return; // shift+wheel already scrolls horizontally
+      if (el!.scrollWidth <= el!.clientWidth) return; // nothing hidden sideways
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return; // honor trackpad horizontal intent
+      const atStart = el!.scrollLeft <= 0;
+      const atEnd = el!.scrollLeft + el!.clientWidth >= el!.scrollWidth - 1;
+      if ((e.deltaY < 0 && atStart) || (e.deltaY > 0 && atEnd)) return; // let the page scroll at edges
+      el!.scrollLeft += e.deltaY;
+      e.preventDefault();
+    }
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      ro.disconnect();
+      el.removeEventListener("wheel", onWheel);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function onPointerDown(e: React.PointerEvent) {
-    if (e.pointerType !== "mouse") return; // touch/pen scroll natively
-    if ((e.target as HTMLElement).closest("button, a, input, select, textarea")) return;
-    drag.current = { startX: e.clientX, startLeft: ref.current?.scrollLeft ?? 0 };
-    moved.current = false;
-  }
-  function onPointerMove(e: React.PointerEvent) {
-    const el = ref.current;
-    if (!drag.current || !el) return;
-    const dx = e.clientX - drag.current.startX;
-    if (!moved.current && Math.abs(dx) < 5) return; // threshold so clicks still register
-    moved.current = true;
-    setGrabbing(true);
-    el.setPointerCapture(e.pointerId);
-    el.scrollLeft = drag.current.startLeft - dx;
-    e.preventDefault();
-  }
-  function endDrag(e: React.PointerEvent) {
-    if (drag.current && moved.current) {
-      try {
-        ref.current?.releasePointerCapture(e.pointerId);
-      } catch {
-        /* capture may not be set */
-      }
-    }
-    drag.current = null;
-    moved.current = false;
-    setGrabbing(false);
-  }
-
-  const scrollable = shadow.left || shadow.right;
   return (
     <div className="relative overflow-hidden rounded-xl border border-black/10 dark:border-white/15">
-      <div
-        ref={ref}
-        onScroll={update}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
-        onPointerLeave={endDrag}
-        className={`overflow-x-auto ${scrollable ? (grabbing ? "cursor-grabbing select-none" : "cursor-grab") : ""}`}
-      >
+      <div ref={ref} onScroll={update} className="overflow-x-auto">
         {children}
       </div>
       {shadow.left && (
@@ -420,7 +368,7 @@ function InventoryTable({ rows, onEdit }: { rows: CatalogRow[]; onEdit: (r: Cata
       </HScroll>
       {scrollable && (
         <p className="mt-1.5 text-xs text-black/45 dark:text-white/45">
-          ↔ Drag the table sideways, or hold Shift while scrolling, to see all columns.
+          ↔ Scroll with your mouse wheel (or hold Shift) to see all columns.
         </p>
       )}
     </>
@@ -588,14 +536,16 @@ function SummaryView({ refreshKey }: { refreshKey: number }) {
   const totalQty = rows.reduce((s, r) => s + r.quantity, 0);
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-black/10 dark:border-white/15">
+    <div className="space-y-2">
+      <p className="text-xs text-black/50 dark:text-white/50">All stock values are in US$.</p>
+      <div className="overflow-x-auto rounded-xl border border-black/10 dark:border-white/15">
       <table className="w-full text-left text-sm">
         <thead className="text-black/50 dark:text-white/50">
           <tr className="border-b border-black/10 dark:border-white/15">
             <th className="px-3 py-2 font-medium">Category</th>
             <th className="px-3 py-2 text-right font-medium">Parts</th>
             <th className="px-3 py-2 text-right font-medium">Total qty</th>
-            <th className="px-3 py-2 text-right font-medium">Stock value</th>
+            <th className="px-3 py-2 text-right font-medium">Stock value (US$)</th>
           </tr>
         </thead>
         <tbody>
@@ -619,6 +569,7 @@ function SummaryView({ refreshKey }: { refreshKey: number }) {
           </tr>
         </tfoot>
       </table>
+      </div>
     </div>
   );
 }
@@ -664,27 +615,6 @@ function Fab({
     </div>
   );
 }
-
-function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-md rounded-xl border border-black/10 bg-[var(--background)] p-5 dark:border-white/15"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="font-medium">{title}</h2>
-          <button className="text-black/50 hover:text-black dark:text-white/50 dark:hover:text-white" onClick={onClose}>
-            ✕
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-const btn = "rounded-md bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500 disabled:opacity-50";
 
 function PartFormModal({
   initial,
@@ -843,247 +773,5 @@ function AddLocationModal({ onClose, onDone }: { onClose: () => void; onDone: ()
         {msg && <p className="text-sm text-black/70 dark:text-white/70">{msg}</p>}
       </form>
     </Modal>
-  );
-}
-
-interface ImportResult {
-  parts: number;
-  stockEntries: number;
-  locations: number;
-  totalQuantity: number;
-  parseErrors?: number;
-}
-
-function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [file, setFile] = useState<File | null>(null);
-  const [purge, setPurge] = useState(false);
-  const [confirmText, setConfirmText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
-  const [result, setResult] = useState<ImportResult | null>(null);
-
-  const canSubmit = file && (!purge || confirmText === "PURGE") && !busy;
-
-  async function run(e: React.FormEvent) {
-    e.preventDefault();
-    if (!file) return;
-    setBusy(true);
-    setMsg("");
-    setResult(null);
-    try {
-      const text = await file.text();
-      if (purge) {
-        setMsg("Purging…");
-        await jpost("/api/parts/purge", { confirm: "PURGE" });
-      }
-      setMsg("Importing…");
-      const res = await jpostText<ImportResult>("/api/parts/import", text);
-      setResult(res);
-      setMsg("");
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Import failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal title="Import inventory CSV" onClose={onClose}>
-      {result ? (
-        <div className="space-y-3 text-sm">
-          <p className="rounded-md bg-green-500/10 px-3 py-2 text-green-700 dark:text-green-400">
-            Imported {result.parts} parts across {result.locations} locations · {result.stockEntries} stock
-            entries · {result.totalQuantity} total units.
-            {result.parseErrors ? ` (${result.parseErrors} rows had parse warnings.)` : ""}
-          </p>
-          <button className={btn} onClick={onDone}>
-            Done
-          </button>
-        </div>
-      ) : (
-        <form onSubmit={run} className="space-y-3 text-sm">
-          <input
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            className="block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-blue-600 file:px-3 file:py-2 file:text-white"
-          />
-          <label className="flex items-center gap-2 text-black/80 dark:text-white/80">
-            <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} />
-            Wipe ALL existing inventory first (full reset — irreversible)
-          </label>
-          {purge && (
-            <input
-              className={inputClass}
-              placeholder='Type PURGE to confirm'
-              value={confirmText}
-              onChange={(e) => setConfirmText(e.target.value)}
-            />
-          )}
-          <button type="submit" className={btn} disabled={!canSubmit}>
-            {busy ? msg || "Working…" : purge ? "Purge & import" : "Import"}
-          </button>
-          {msg && !busy && <p className="text-red-600 dark:text-red-400">{msg}</p>}
-        </form>
-      )}
-    </Modal>
-  );
-}
-
-const cardClass = "rounded-xl border border-black/10 p-4 dark:border-white/15";
-
-function SettingsView({ onOpenImport }: { onOpenImport: () => void }) {
-  return (
-    <div className="space-y-4">
-      <section className={cardClass}>
-        <h2 className="mb-1 font-medium">Import inventory CSV</h2>
-        <p className="mb-3 text-sm text-black/60 dark:text-white/60">
-          Bulk-load parts and stock from a CurrentInventory CSV export — optionally wiping all
-          existing data first.
-        </p>
-        <button className={btn} onClick={onOpenImport}>
-          Import CSV…
-        </button>
-      </section>
-      <SyncPanel />
-    </div>
-  );
-}
-
-interface SyncStatus {
-  configured: boolean;
-  values: number;
-  costs: number;
-}
-
-interface SyncBatch {
-  processed: number;
-  updated: number;
-  nextAfterId: number | null;
-}
-
-/** Combined, resumable DigiKey/Mouser sync with per-operation toggles (one lookup per part). */
-function SyncPanel() {
-  const [status, setStatus] = useState<SyncStatus | null>(null);
-  const [fillValues, setFillValues] = useState(true);
-  const [refreshCosts, setRefreshCosts] = useState(true);
-  const [running, setRunning] = useState(false);
-  const [swept, setSwept] = useState(0);
-  const [updated, setUpdated] = useState(0);
-  const [done, setDone] = useState(false);
-  const [msg, setMsg] = useState("");
-  const [reloadKey, setReloadKey] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      try {
-        const s = await jget<SyncStatus>("/api/parts/sync");
-        if (active) setStatus(s);
-      } catch (e) {
-        if (active && e instanceof Error && e.message !== "locked") setMsg(e.message);
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [reloadKey]);
-
-  async function run() {
-    setRunning(true);
-    setMsg("");
-    setDone(false);
-    setSwept(0);
-    setUpdated(0);
-    let afterId = 0;
-    let sweptTotal = 0;
-    let updatedTotal = 0;
-    try {
-      for (;;) {
-        const res = await jpost<SyncBatch>("/api/parts/sync", {
-          fillValues,
-          refreshCosts,
-          limit: 25,
-          afterId,
-        });
-        sweptTotal += res.processed;
-        updatedTotal += res.updated;
-        setSwept(sweptTotal);
-        setUpdated(updatedTotal);
-        if (res.nextAfterId === null) break;
-        afterId = res.nextAfterId;
-        await new Promise((r) => setTimeout(r, 300)); // gentle pause between batches
-      }
-      setDone(true);
-      setReloadKey((k) => k + 1);
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Sync failed.");
-    } finally {
-      setRunning(false);
-    }
-  }
-
-  return (
-    <section className={cardClass}>
-      <h2 className="mb-1 font-medium">Sync from distributors</h2>
-      <p className="mb-3 text-sm text-black/60 dark:text-white/60">
-        Look up DigiKey/Mouser parts to fill details — one lookup per part, throttled to respect API
-        rate limits.
-      </p>
-      {status === null && !msg && <p className="text-sm text-black/50 dark:text-white/50">Loading…</p>}
-      {status && !status.configured && (
-        <p className="rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
-          No distributor API configured. Add <code>DIGIKEY_CLIENT_ID</code>/<code>SECRET</code> (and set{" "}
-          <code>DIGIKEY_USE_SANDBOX=false</code>) and/or <code>MOUSER_API_KEY</code> to{" "}
-          <code>web/.env.local</code>, then restart the dev server.
-        </p>
-      )}
-      {status?.configured && (
-        <div className="space-y-2 text-sm">
-          <label className="flex items-start gap-2">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={fillValues}
-              onChange={(e) => setFillValues(e.target.checked)}
-              disabled={running}
-            />
-            <span>
-              <span className="font-medium">Fill missing values ({status.values})</span> — component
-              value + blank category/size, looked up by MPN or supplier part #.
-            </span>
-          </label>
-          <label className="flex items-start gap-2">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={refreshCosts}
-              onChange={(e) => setRefreshCosts(e.target.checked)}
-              disabled={running}
-            />
-            <span>
-              <span className="font-medium">Refresh unit costs in USD ({status.costs})</span> —
-              DigiKey/Mouser parts only; LCSC and unidentified parts are left unchanged.
-            </span>
-          </label>
-          <div className="flex flex-wrap items-center gap-3 pt-1">
-            <button className={btn} onClick={run} disabled={running || (!fillValues && !refreshCosts)}>
-              {running ? "Syncing…" : "Run sync"}
-            </button>
-            {running && (
-              <span className="text-black/60 dark:text-white/60">
-                Swept {swept}… updated {updated}.
-              </span>
-            )}
-            {done && !running && (
-              <span className="text-green-700 dark:text-green-400">
-                Done — swept {swept}, updated {updated}.
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-      {msg && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{msg}</p>}
-    </section>
   );
 }
