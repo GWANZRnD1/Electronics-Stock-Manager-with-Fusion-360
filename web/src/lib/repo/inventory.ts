@@ -6,9 +6,13 @@ import { and, eq, ilike, or, sql, type SQL } from "drizzle-orm";
 import type { PgColumn } from "drizzle-orm/pg-core";
 
 import { getDb } from "@/lib/db";
+import { lookupPart } from "@/lib/distributors";
 import { inventoryTxns, locations, parts, stockItems } from "@/lib/db/schema";
 import { bundleCategories, categoryKey } from "@/lib/domain/categories";
+import { deriveField, deriveValue } from "@/lib/domain/enrich";
 import type { NormalizedRow } from "@/lib/domain/inventoryCsv";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Editable part metadata shared by create and update. unitCost is per-unit money. */
 export interface PartFields {
@@ -513,4 +517,78 @@ export async function importInventory(rows: NormalizedRow[]): Promise<ImportResu
       totalQuantity: stockValues.reduce((s, v) => s + (v.quantity ?? 0), 0),
     };
   });
+}
+
+// Parts eligible for distributor value enrichment: blank value, a real MPN, not a jellybean.
+const enrichWhere = () =>
+  and(eq(parts.value, ""), sql`${parts.mpn} <> ''`, sql`lower(${parts.supplier}) <> 'jellybean'`);
+
+/** Count of parts still missing a component value (for the enrich UI). */
+export async function enrichableCount(): Promise<number> {
+  const [row] = await getDb().select({ n: sql<number>`count(*)` }).from(parts).where(enrichWhere());
+  return Number(row?.n ?? 0);
+}
+
+export interface EnrichBatchResult {
+  processed: number;
+  updated: number;
+  nextAfterId: number | null; // pass back as `afterId` for the next batch; null = sweep complete
+}
+
+/**
+ * One resumable batch of distributor enrichment. Sweeps parts by ascending id
+ * (so value-less parts like ICs aren't retried endlessly), filling blank value
+ * /category/package from DigiKey/Mouser. Sequential with a delay between parts to
+ * respect rate limits; lookupPart caches. Drive it with a loop, passing the
+ * returned nextAfterId until it comes back null.
+ */
+export async function enrichValues(
+  opts: { limit?: number; delayMs?: number; afterId?: number } = {},
+): Promise<EnrichBatchResult> {
+  const limit = Math.min(Math.max(opts.limit ?? 25, 1), 200);
+  const delayMs = opts.delayMs ?? 300;
+  const afterId = opts.afterId ?? 0;
+  const db = getDb();
+
+  const targets = await db
+    .select({
+      id: parts.id,
+      mpn: parts.mpn,
+      description: parts.description,
+      category: parts.category,
+      package: parts.package,
+    })
+    .from(parts)
+    .where(and(enrichWhere(), sql`${parts.id} > ${afterId}`))
+    .orderBy(parts.id)
+    .limit(limit);
+
+  let updated = 0;
+  for (let i = 0; i < targets.length; i++) {
+    const t = targets[i];
+    let offers;
+    try {
+      ({ offers } = await lookupPart(t.mpn));
+    } catch {
+      continue; // transient distributor error — leave it for a later sweep
+    }
+    const patch: Partial<typeof parts.$inferInsert> = {};
+    const value = deriveValue(offers, t.description);
+    if (value) patch.value = value;
+    if (!t.category) {
+      const c = deriveField(offers, "category");
+      if (c) patch.category = c;
+    }
+    if (!t.package) {
+      const p = deriveField(offers, "package");
+      if (p) patch.package = p;
+    }
+    if (Object.keys(patch).length > 0) {
+      await db.update(parts).set({ ...patch, updatedAt: sql`now()` }).where(eq(parts.id, t.id));
+      updated++;
+    }
+    if (i < targets.length - 1) await sleep(delayMs);
+  }
+
+  return { processed: targets.length, updated, nextAfterId: targets.at(-1)?.id ?? null };
 }

@@ -66,6 +66,17 @@ function dkPackage(params: DkProduct["Parameters"]): string {
   return "";
 }
 
+// Component-value parameters, in priority order — the headline rating for each part type.
+const VALUE_PARAMS = ["resistance", "capacitance", "inductance", "frequency", "voltage - rated"];
+
+function dkValue(params: DkProduct["Parameters"]): string {
+  for (const name of VALUE_PARAMS) {
+    const p = (params ?? []).find((x) => (x.ParameterText ?? "").toLowerCase() === name);
+    if (p?.ValueText) return p.ValueText;
+  }
+  return "";
+}
+
 export async function digikeySearch(mpn: string): Promise<DistributorOffer | null> {
   if (!digikeyConfigured()) return mockOffer(mpn);
 
@@ -100,6 +111,7 @@ export async function digikeySearch(mpn: string): Promise<DistributorOffer | nul
     description: product.Description?.ProductDescription ?? "",
     category: product.Category?.Name ?? "",
     package: dkPackage(product.Parameters),
+    value: dkValue(product.Parameters),
     distributorPartNumber: variation?.DigiKeyProductNumber ?? "",
     stock: product.QuantityAvailable ?? 0,
     priceBreaks,

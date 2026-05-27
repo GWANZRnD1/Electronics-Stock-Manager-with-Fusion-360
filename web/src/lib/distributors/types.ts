@@ -14,6 +14,7 @@ export interface DistributorOffer {
   category: string;
   package: string;
   distributorPartNumber: string;
+  value?: string; // parametric component value (e.g. "10 kOhms", "0.1 µF"), when available
   stock: number;
   priceBreaks: PriceBreak[];
   productUrl: string;

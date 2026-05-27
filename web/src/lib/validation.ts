@@ -33,6 +33,11 @@ export const purgeSchema = z.object({
   confirm: z.literal("PURGE"),
 });
 
+export const enrichSchema = z.object({
+  limit: z.number().int().min(1).max(200).optional(),
+  afterId: z.number().int().min(0).optional(),
+});
+
 export const createLocationSchema = z.object({
   name: z.string().trim().min(1).max(64),
   description: z.string().trim().max(256).optional(),

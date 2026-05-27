@@ -96,7 +96,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [fabOpen, setFabOpen] = useState(false);
-  const [modal, setModal] = useState<"part" | "location" | "import" | null>(null);
+  const [modal, setModal] = useState<"part" | "location" | "import" | "enrich" | null>(null);
   const [editing, setEditing] = useState<CatalogRow | null>(null);
 
   useEffect(() => {
@@ -229,6 +229,10 @@ export default function Home() {
           setModal("import");
           setFabOpen(false);
         }}
+        onEnrich={() => {
+          setModal("enrich");
+          setFabOpen(false);
+        }}
       />
 
       {modal === "part" && (
@@ -263,6 +267,15 @@ export default function Home() {
       )}
       {modal === "import" && (
         <ImportModal
+          onClose={() => setModal(null)}
+          onDone={() => {
+            setModal(null);
+            refresh();
+          }}
+        />
+      )}
+      {modal === "enrich" && (
+        <EnrichModal
           onClose={() => setModal(null)}
           onDone={() => {
             setModal(null);
@@ -524,12 +537,14 @@ function Fab({
   onAddPart,
   onAddLocation,
   onImport,
+  onEnrich,
 }: {
   open: boolean;
   onToggle: () => void;
   onAddPart: () => void;
   onAddLocation: () => void;
   onImport: () => void;
+  onEnrich: () => void;
 }) {
   const action = "flex items-center gap-2";
   const bubble = "grid h-12 w-12 place-items-center rounded-full text-white shadow-lg";
@@ -542,6 +557,10 @@ function Fab({
           open ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-3 opacity-0"
         }`}
       >
+        <button className={action} onClick={onEnrich}>
+          <span className={label}>Enrich values</span>
+          <span className={`${bubble} bg-amber-600`}>✨</span>
+        </button>
         <button className={action} onClick={onImport}>
           <span className={label}>Import CSV</span>
           <span className={`${bubble} bg-purple-700`}>📄</span>
@@ -827,6 +846,109 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
           {msg && !busy && <p className="text-red-600 dark:text-red-400">{msg}</p>}
         </form>
       )}
+    </Modal>
+  );
+}
+
+interface EnrichStatus {
+  configured: boolean;
+  enrichable: number;
+}
+
+interface EnrichBatch {
+  processed: number;
+  updated: number;
+  nextAfterId: number | null;
+}
+
+function EnrichModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [status, setStatus] = useState<EnrichStatus | null>(null);
+  const [running, setRunning] = useState(false);
+  const [swept, setSwept] = useState(0);
+  const [updated, setUpdated] = useState(0);
+  const [done, setDone] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const s = await jget<EnrichStatus>("/api/parts/enrich");
+        if (active) setStatus(s);
+      } catch (e) {
+        if (active && e instanceof Error && e.message !== "locked") setMsg(e.message);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function run() {
+    setRunning(true);
+    setMsg("");
+    setDone(false);
+    let afterId = 0;
+    let sweptTotal = 0;
+    let updatedTotal = 0;
+    try {
+      for (;;) {
+        const res = await jpost<EnrichBatch>("/api/parts/enrich", { limit: 25, afterId });
+        sweptTotal += res.processed;
+        updatedTotal += res.updated;
+        setSwept(sweptTotal);
+        setUpdated(updatedTotal);
+        if (res.nextAfterId === null) break;
+        afterId = res.nextAfterId;
+        await new Promise((r) => setTimeout(r, 300)); // gentle pause between batches
+      }
+      setDone(true);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Enrichment failed.");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <Modal title="Enrich values from DigiKey/Mouser" onClose={onClose}>
+      <div className="space-y-3 text-sm">
+        {status === null && !msg && <p className="text-black/50 dark:text-white/50">Loading…</p>}
+        {status && !status.configured && (
+          <p className="rounded-md bg-amber-500/10 px-3 py-2 text-amber-700 dark:text-amber-400">
+            No distributor API configured. Add <code>DIGIKEY_CLIENT_ID</code>/<code>SECRET</code> (and
+            set <code>DIGIKEY_USE_SANDBOX=false</code>) and/or <code>MOUSER_API_KEY</code> to
+            <code> web/.env.local</code>, then restart the dev server.
+          </p>
+        )}
+        {status?.configured && !done && (
+          <>
+            <p className="text-black/70 dark:text-white/70">
+              {status.enrichable} part{status.enrichable === 1 ? "" : "s"} missing a value. Each is
+              looked up on DigiKey/Mouser (throttled) to fill the value, plus blank category/size.
+            </p>
+            {running && (
+              <p className="text-black/60 dark:text-white/60">
+                Swept {swept}… updated {updated}.
+              </p>
+            )}
+            <button className={btn} onClick={run} disabled={running || status.enrichable === 0}>
+              {running ? "Enriching…" : "Start enrichment"}
+            </button>
+          </>
+        )}
+        {done && (
+          <>
+            <p className="rounded-md bg-green-500/10 px-3 py-2 text-green-700 dark:text-green-400">
+              Done — swept {swept} parts, updated {updated}.
+            </p>
+            <button className={btn} onClick={onDone}>
+              Done
+            </button>
+          </>
+        )}
+        {msg && <p className="text-red-600 dark:text-red-400">{msg}</p>}
+      </div>
     </Modal>
   );
 }
