@@ -1,7 +1,7 @@
 "use client";
 
-import type { IScannerControls } from "@zxing/browser";
 import { useEffect, useRef, useState } from "react";
+import type { ReaderOptions } from "zxing-wasm/reader";
 
 import { Nav } from "@/components/Nav";
 import { jget, jpost } from "@/lib/client";
@@ -21,50 +21,53 @@ interface Offer {
   mock: boolean;
 }
 
-// Native Barcode Detection API (Android Chrome). Minimally typed — it isn't in
-// the DOM lib yet — and feature-detected at runtime, so iOS/desktop fall back.
-interface DetectedBarcode {
-  rawValue: string;
-  format: string;
-}
-interface BarcodeDetectorInstance {
-  detect(source: CanvasImageSource): Promise<DetectedBarcode[]>;
-}
-interface BarcodeDetectorCtor {
-  new (opts?: { formats?: string[] }): BarcodeDetectorInstance;
-  getSupportedFormats(): Promise<string[]>;
-}
-// Torch lives on the video track but isn't in the standard MediaTrack types.
-type TorchCapabilities = MediaTrackCapabilities & { torch?: boolean };
-type TorchConstraintSet = MediaTrackConstraintSet & { torch?: boolean };
+// Camera track capabilities/constraints not yet in the standard DOM lib types.
+type TrackCapabilities = MediaTrackCapabilities & {
+  torch?: boolean;
+  zoom?: { min: number; max: number; step?: number };
+  focusMode?: string[];
+};
+type TrackConstraintSet = MediaTrackConstraintSet & {
+  torch?: boolean;
+  zoom?: number;
+  focusMode?: string;
+};
+type ReaderModule = typeof import("zxing-wasm/reader");
 
-// A dense reel/bag DataMatrix needs real resolution to resolve.
+// Request real resolution — a dense LCSC QR needs pixels to resolve its modules.
 const VIDEO_CONSTRAINTS: MediaTrackConstraints = {
   facingMode: { ideal: "environment" },
   width: { ideal: 1920 },
   height: { ideal: 1080 },
 };
-
-function barcodeDetectorCtor(): BarcodeDetectorCtor | null {
-  const w = window as unknown as { BarcodeDetector?: BarcodeDetectorCtor };
-  return w.BarcodeDetector ?? null;
-}
+// ZXing-C++ (WASM) reader: try hard, both orientations and inverted, one symbol.
+const READER_OPTIONS: ReaderOptions = {
+  formats: ["QRCode", "MicroQRCode", "DataMatrix"],
+  tryHarder: true,
+  tryRotate: true,
+  tryInvert: true,
+  maxNumberOfSymbols: 1,
+};
 
 const inputClass =
   "w-full rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20";
 
 export default function ScanPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const controlsRef = useRef<IScannerControls | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const trackRef = useRef<MediaStreamTrack | null>(null);
+  const readerRef = useRef<ReaderModule | null>(null);
   const loopRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scanningRef = useRef(false);
 
   const [scanning, setScanning] = useState(false);
+  const [busy, setBusy] = useState(false); // one-shot capture in flight
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
+  const [zoomRange, setZoomRange] = useState<{ min: number; max: number; step: number } | null>(null);
+  const [zoom, setZoom] = useState(0);
   const [hint, setHint] = useState("");
   const [locations, setLocations] = useState<Location[]>([]);
   const [mpn, setMpn] = useState("");
@@ -97,7 +100,6 @@ export default function ScanPage() {
       active = false;
       // Tear down the camera without touching state (component is unmounting).
       scanningRef.current = false;
-      controlsRef.current?.stop();
       if (loopRef.current) clearTimeout(loopRef.current);
       if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -146,12 +148,89 @@ export default function ScanPage() {
     }
   }
 
-  /** Wire torch state from the live track's capabilities, if it has a lamp. */
-  function setupTorch(track: MediaStreamTrack | undefined) {
+  function scratchCanvas(): HTMLCanvasElement {
+    return (canvasRef.current ??= document.createElement("canvas"));
+  }
+
+  /** Decode the current video frame with the WASM reader. Returns text or null. */
+  async function decodeFrame(): Promise<string | null> {
+    const reader = readerRef.current;
+    const video = videoRef.current;
+    if (!reader || !video) return null;
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (!w || !h) return null;
+    const canvas = scratchCanvas();
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, w, h);
+    const results = await reader.readBarcodes(ctx.getImageData(0, 0, w, h), READER_OPTIONS);
+    return results.find((r) => r.text)?.text ?? null;
+  }
+
+  async function scanLoop() {
+    if (!scanningRef.current) return;
+    try {
+      const text = await decodeFrame();
+      if (text) {
+        applyRaw(text);
+        stop();
+        return;
+      }
+    } catch {
+      /* transient decode failure (frame not ready, wasm warming up) — keep going */
+    }
+    if (scanningRef.current) loopRef.current = setTimeout(() => void scanLoop(), 180);
+  }
+
+  /** Wire torch/zoom/focus from the live track's capabilities. */
+  async function setupTrack(track: MediaStreamTrack | undefined) {
     trackRef.current = track ?? null;
-    const caps = track?.getCapabilities?.() as TorchCapabilities | undefined;
+    if (!track) {
+      setTorchSupported(false);
+      setZoomRange(null);
+      return;
+    }
+    const caps = track.getCapabilities?.() as TrackCapabilities | undefined;
     setTorchSupported(Boolean(caps?.torch));
     setTorchOn(false);
+    // Continuous autofocus keeps a tiny code sharp as the user moves closer.
+    if (caps?.focusMode?.includes("continuous")) {
+      try {
+        await track.applyConstraints({ advanced: [{ focusMode: "continuous" } as TrackConstraintSet] });
+      } catch {
+        /* focus control is best-effort */
+      }
+    }
+    // Zoom is the biggest lever for dense codes: crop the sensor so the code
+    // fills more pixels. Start partway in and expose a slider.
+    if (caps?.zoom && caps.zoom.max > caps.zoom.min) {
+      const { min, max } = caps.zoom;
+      const step = caps.zoom.step && caps.zoom.step > 0 ? caps.zoom.step : (max - min) / 100;
+      const initial = Math.min(max, min + (max - min) * 0.4);
+      setZoomRange({ min, max, step });
+      setZoom(initial);
+      try {
+        await track.applyConstraints({ advanced: [{ zoom: initial } as TrackConstraintSet] });
+      } catch {
+        /* zoom control is best-effort */
+      }
+    } else {
+      setZoomRange(null);
+    }
+  }
+
+  async function onZoom(value: number) {
+    setZoom(value);
+    const track = trackRef.current;
+    if (!track) return;
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: value } as TrackConstraintSet] });
+    } catch {
+      /* ignore — slider stays where the user left it */
+    }
   }
 
   async function toggleTorch() {
@@ -159,7 +238,7 @@ export default function ScanPage() {
     if (!track) return;
     const next = !torchOn;
     try {
-      await track.applyConstraints({ advanced: [{ torch: next } as TorchConstraintSet] });
+      await track.applyConstraints({ advanced: [{ torch: next } as TrackConstraintSet] });
       setTorchOn(next);
     } catch {
       setError("Couldn't toggle the light on this camera.");
@@ -167,32 +246,14 @@ export default function ScanPage() {
   }
 
   function startHintTimer() {
-    setHint("Scanning… fill the frame with the code and hold steady.");
+    setHint("Scanning… fill the box with the code and hold steady.");
     hintTimerRef.current = setTimeout(() => {
       if (scanningRef.current) {
         setHint(
-          "Still scanning — move closer so the code fills the box, steady your hand, and turn the light on if it's glossy.",
+          "Still scanning — zoom in, move closer, steady your hand, turn the light on, or tap Capture for a sharp photo.",
         );
       }
     }, 6000);
-  }
-
-  // Native BarcodeDetector polling loop (Android). Stops on the first hit.
-  async function runDetectorLoop(detector: BarcodeDetectorInstance, video: HTMLVideoElement) {
-    if (!scanningRef.current) return;
-    try {
-      if (video.readyState >= 2 && video.videoWidth > 0) {
-        const codes = await detector.detect(video);
-        if (codes.length > 0) {
-          applyRaw(codes[0].rawValue);
-          stop();
-          return;
-        }
-      }
-    } catch {
-      /* transient detect failures (e.g. frame not ready) — keep polling */
-    }
-    loopRef.current = setTimeout(() => void runDetectorLoop(detector, video), 120);
   }
 
   async function start() {
@@ -213,48 +274,30 @@ export default function ScanPage() {
     try {
       scanningRef.current = true;
       setScanning(true);
+      setHint("Starting camera…");
+      const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS });
+      streamRef.current = stream;
+      const video = videoRef.current!;
+      video.srcObject = stream;
+      await video.play().catch(() => {});
+      await setupTrack(stream.getVideoTracks()[0]);
 
-      // Prefer the native Barcode Detection API where it can do DataMatrix + QR
-      // (Android Chrome): hardware-accelerated and far stronger than the JS port.
-      const Ctor = barcodeDetectorCtor();
-      const nativeFormats = Ctor ? await Ctor.getSupportedFormats() : [];
-      const useNative =
-        !!Ctor && nativeFormats.includes("data_matrix") && nativeFormats.includes("qr_code");
+      // ZXing-C++ via WebAssembly — strong on dense DataMatrix/QR and works on
+      // iOS and Android alike. The .wasm is self-hosted from /public so there's
+      // no CDN/CSP dependency; fire it immediately so it warms while we frame up.
+      setHint("Loading scanner…");
+      const reader = await import("zxing-wasm/reader");
+      reader.prepareZXingModule({
+        overrides: {
+          locateFile: (path, prefix) =>
+            path.endsWith(".wasm") ? "/zxing_reader.wasm" : prefix + path,
+        },
+        fireImmediately: true,
+      });
+      readerRef.current = reader;
 
-      if (useNative && Ctor) {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS });
-        streamRef.current = stream;
-        const video = videoRef.current!;
-        video.srcObject = stream;
-        await video.play().catch(() => {});
-        setupTorch(stream.getVideoTracks()[0]);
-        const detector = new Ctor({ formats: ["data_matrix", "qr_code"] });
-        void runDetectorLoop(detector, video);
-      } else {
-        // Fallback: ZXing with TRY_HARDER, high resolution, and a tight retry
-        // interval (the 500ms default only gives ~2 decode attempts/second).
-        const { BrowserMultiFormatReader } = await import("@zxing/browser");
-        const { BarcodeFormat, DecodeHintType } = await import("@zxing/library");
-        const hints = new Map();
-        hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-          BarcodeFormat.DATA_MATRIX,
-          BarcodeFormat.QR_CODE,
-        ]);
-        hints.set(DecodeHintType.TRY_HARDER, true);
-        const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 100 });
-        controlsRef.current = await reader.decodeFromConstraints(
-          { video: VIDEO_CONSTRAINTS },
-          videoRef.current!,
-          (result) => {
-            if (result) {
-              applyRaw(result.getText());
-              stop();
-            }
-          },
-        );
-        setupTorch((videoRef.current!.srcObject as MediaStream | null)?.getVideoTracks()[0]);
-      }
       startHintTimer();
+      void scanLoop();
     } catch (e) {
       stop();
       const detail =
@@ -269,10 +312,43 @@ export default function ScanPage() {
     }
   }
 
+  // One-shot: grab a full-resolution still (where supported) and decode it. The
+  // trick real scanner apps use for tiny dense codes the live feed can't resolve.
+  async function captureDecode() {
+    const reader = readerRef.current;
+    if (busy || !reader) return;
+    setBusy(true);
+    setError("");
+    setHint("Capturing a sharp photo…");
+    try {
+      let text: string | null = null;
+      const track = trackRef.current;
+      const w = window as unknown as {
+        ImageCapture?: new (t: MediaStreamTrack) => { takePhoto: () => Promise<Blob> };
+      };
+      if (track && w.ImageCapture) {
+        try {
+          const blob = await new w.ImageCapture(track).takePhoto();
+          text = (await reader.readBarcodes(blob, READER_OPTIONS)).find((r) => r.text)?.text ?? null;
+        } catch {
+          /* ImageCapture not usable here — fall back to a video frame */
+        }
+      }
+      if (!text) text = await decodeFrame();
+      if (text) {
+        applyRaw(text);
+        stop();
+      } else {
+        setError("No code found in that frame. Fill the box with the code, hold steady, and try again.");
+        setHint("Scanning…");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function stop() {
     scanningRef.current = false;
-    controlsRef.current?.stop();
-    controlsRef.current = null;
     if (loopRef.current) clearTimeout(loopRef.current);
     loopRef.current = null;
     if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
@@ -287,6 +363,8 @@ export default function ScanPage() {
     trackRef.current = null;
     setTorchSupported(false);
     setTorchOn(false);
+    setZoomRange(null);
+    setZoom(0);
     setHint("");
     setScanning(false);
   }
@@ -372,8 +450,32 @@ export default function ScanPage() {
             </button>
           )}
         </div>
-        {scanning && hint && (
-          <p className="mt-2 text-xs text-black/60 dark:text-white/60">{hint}</p>
+
+        {scanning && (
+          <div className="mt-3 space-y-3">
+            {zoomRange && (
+              <label className="flex items-center gap-3 text-sm text-black/60 dark:text-white/60">
+                <span className="w-12 shrink-0">Zoom</span>
+                <input
+                  type="range"
+                  className="flex-1"
+                  min={zoomRange.min}
+                  max={zoomRange.max}
+                  step={zoomRange.step}
+                  value={zoom}
+                  onChange={(e) => void onZoom(Number(e.target.value))}
+                />
+              </label>
+            )}
+            <button
+              className="w-full rounded-md border border-black/15 px-4 py-2 text-sm font-medium disabled:opacity-50 dark:border-white/20"
+              onClick={() => void captureDecode()}
+              disabled={busy}
+            >
+              {busy ? "Reading…" : "Capture a sharp photo"}
+            </button>
+            {hint && <p className="text-xs text-black/60 dark:text-white/60">{hint}</p>}
+          </div>
         )}
 
         <div className="mt-3 flex gap-2">
