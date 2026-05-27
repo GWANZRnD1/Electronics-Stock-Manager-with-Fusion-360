@@ -29,18 +29,34 @@ export function listBuilds(boardId: number) {
 
 /**
  * Build `quantity` units: only BOM lines with an MPN that maps to a catalog part
- * are tracked/consumed (lines without an MPN are counted as "untracked"). Blocks
- * (no consumption) if any tracked part is short; otherwise consumes stock greedily
- * across locations, logging an inventory_txn + build_consumption per draw.
+ * are tracked/consumed (lines without an MPN are counted as "untracked"). With
+ * `onlyMpns`, just those MPNs are required/consumed. Blocks (no consumption) if a
+ * tracked-and-selected part is short; otherwise consumes stock greedily across
+ * locations, logging an inventory_txn + build_consumption per draw.
  */
-export async function buildBoard(boardId: number, quantity: number, actor: string) {
+export async function buildBoard(
+  boardId: number,
+  quantity: number,
+  actor: string,
+  onlyMpns?: string[],
+) {
   const db = getDb();
   const lines = await db.select().from(bomLines).where(eq(bomLines.boardId, boardId));
+
+  // When a selection is given, only those MPNs are required and consumed; the
+  // shortage check below then blocks only on the *selected* parts.
+  const only = onlyMpns && onlyMpns.length > 0 ? new Set(onlyMpns) : null;
 
   const requiredByMpn = new Map<string, number>();
   let untracked = 0;
   for (const line of lines) {
     const mpn = (line.partMpn ?? "").trim();
+    if (only) {
+      if (mpn && only.has(mpn)) {
+        requiredByMpn.set(mpn, (requiredByMpn.get(mpn) ?? 0) + line.qtyPerBoard * quantity);
+      }
+      continue;
+    }
     if (!mpn) {
       untracked += 1;
       continue;
@@ -118,5 +134,92 @@ export async function buildBoard(boardId: number, quantity: number, actor: strin
     }
 
     return { build, consumed, untracked };
+  });
+}
+
+export class NoBuildError extends Error {
+  constructor() {
+    super("no build to cancel");
+    this.name = "NoBuildError";
+  }
+}
+
+export interface CancelResult {
+  buildId: number;
+  reversed: { mpn: string; qty: number }[];
+  fullyCancelled: boolean;
+}
+
+/**
+ * Reverse the most recent completed build: re-credit the consumed stock to the
+ * exact part+location it was drawn from, logging a "build-cancel" txn per draw.
+ * With `onlyMpns`, only those parts are restored (a partial cancel); the build is
+ * marked "cancelled" once nothing is left to reverse.
+ */
+export async function cancelLastBuild(
+  boardId: number,
+  onlyMpns: string[] | undefined,
+  actor: string,
+): Promise<CancelResult> {
+  const db = getDb();
+  const [latest] = await db
+    .select()
+    .from(builds)
+    .where(and(eq(builds.boardId, boardId), eq(builds.status, "completed")))
+    .orderBy(desc(builds.createdAt))
+    .limit(1);
+  if (!latest) throw new NoBuildError();
+
+  const cons = await db
+    .select({
+      id: buildConsumptions.id,
+      partId: buildConsumptions.partId,
+      locationId: buildConsumptions.locationId,
+      quantity: buildConsumptions.quantity,
+      mpn: parts.mpn,
+    })
+    .from(buildConsumptions)
+    .innerJoin(parts, eq(parts.id, buildConsumptions.partId))
+    .where(eq(buildConsumptions.buildId, latest.id));
+
+  const only = onlyMpns && onlyMpns.length > 0 ? new Set(onlyMpns) : null;
+  const target = only ? cons.filter((c) => only.has(c.mpn)) : cons;
+  if (target.length === 0) throw new NoBuildError();
+
+  return db.transaction(async (tx) => {
+    const reversedByMpn = new Map<string, number>();
+    for (const c of target) {
+      if (c.locationId != null) {
+        await tx
+          .update(stockItems)
+          .set({ quantity: sql`${stockItems.quantity} + ${c.quantity}` })
+          .where(and(eq(stockItems.partId, c.partId), eq(stockItems.locationId, c.locationId)));
+      }
+      await tx.insert(inventoryTxns).values({
+        partId: c.partId,
+        locationId: c.locationId,
+        delta: c.quantity,
+        reason: "build-cancel",
+        ref: `build:${latest.id}`,
+        actor,
+      });
+      await tx.delete(buildConsumptions).where(eq(buildConsumptions.id, c.id));
+      reversedByMpn.set(c.mpn, (reversedByMpn.get(c.mpn) ?? 0) + c.quantity);
+    }
+
+    const [{ remaining }] = await tx
+      .select({ remaining: sql<number>`COUNT(*)` })
+      .from(buildConsumptions)
+      .where(eq(buildConsumptions.buildId, latest.id));
+    const fullyCancelled = Number(remaining) === 0;
+    if (fullyCancelled) {
+      await tx.update(builds).set({ status: "cancelled" }).where(eq(builds.id, latest.id));
+    }
+
+    return {
+      buildId: latest.id,
+      reversed: [...reversedByMpn].map(([mpn, qty]) => ({ mpn, qty })),
+      fullyCancelled,
+    };
   });
 }

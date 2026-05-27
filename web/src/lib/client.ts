@@ -36,6 +36,10 @@ export function jpatch<T>(url: string, body: unknown): Promise<T> {
   return send<T>("PATCH", url, body);
 }
 
+export async function jdel<T>(url: string): Promise<T> {
+  return handle<T>(await fetch(url, { method: "DELETE" }));
+}
+
 /** POST a raw text body (e.g. an uploaded CSV file's contents). */
 export async function jpostText<T>(url: string, text: string): Promise<T> {
   return handle<T>(

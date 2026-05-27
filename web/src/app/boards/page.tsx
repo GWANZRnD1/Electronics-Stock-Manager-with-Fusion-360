@@ -5,12 +5,19 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Nav } from "@/components/Nav";
-import { jget, jpost } from "@/lib/client";
+import { jdel, jget, jpatch, jpost } from "@/lib/client";
 
 interface Board {
   id: number;
   name: string;
   revision: string;
+  archived: boolean;
+  createdAt: string;
+}
+
+interface Family {
+  name: string;
+  revisions: Board[]; // newest first
 }
 
 /**
@@ -34,6 +41,67 @@ async function readBomJson(file: File): Promise<unknown> {
   return JSON.parse(text.replace(/^﻿/, ""));
 }
 
+/** Collapse board rows into families keyed by name; revisions newest-first. */
+function groupByName(boards: Board[]): Family[] {
+  const map = new Map<string, Board[]>();
+  for (const b of boards) {
+    const arr = map.get(b.name) ?? [];
+    arr.push(b);
+    map.set(b.name, arr);
+  }
+  return [...map.entries()]
+    .map(([name, revisions]) => ({
+      name,
+      revisions: [...revisions].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      ),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+const inputCls =
+  "rounded-md border border-black/15 bg-transparent px-2 py-1 text-sm outline-none focus:border-blue-500 dark:border-white/20";
+const btnSm =
+  "rounded-md border border-black/15 px-2.5 py-1 text-sm hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/[0.04]";
+
+/** A self-contained inline editor (its own draft state) used for name/revision. */
+function InlineEdit({
+  initial,
+  placeholder,
+  busy,
+  onSave,
+  onCancel,
+}: {
+  initial: string;
+  placeholder?: string;
+  busy: boolean;
+  onSave: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  return (
+    <span className="flex items-center gap-1.5">
+      <input
+        autoFocus
+        className={inputCls}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onSave(value.trim());
+          if (e.key === "Escape") onCancel();
+        }}
+      />
+      <button className={btnSm} disabled={busy} onClick={() => onSave(value.trim())}>
+        Save
+      </button>
+      <button className={btnSm} disabled={busy} onClick={onCancel}>
+        Cancel
+      </button>
+    </span>
+  );
+}
+
 export default function BoardsPage() {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -41,6 +109,9 @@ export default function BoardsPage() {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Per-family selected revision (board id) and the single active inline edit.
+  const [selected, setSelected] = useState<Record<string, number>>({});
+  const [edit, setEdit] = useState<{ id: number; field: "name" | "revision" } | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -101,6 +172,39 @@ export default function BoardsPage() {
     }
   }
 
+  async function run(fn: () => Promise<unknown>) {
+    setBusy(true);
+    setError("");
+    try {
+      await fn();
+      setEdit(null);
+      await reload();
+    } catch (e) {
+      if (e instanceof Error && e.message !== "locked") setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function removeRevision(b: Board) {
+    const label = b.revision ? `${b.name} (${b.revision})` : b.name;
+    if (!window.confirm(`Delete "${label}"? Its BOM and build history are removed too.`)) return;
+    void run(() => jdel(`/api/boards/${b.id}`));
+  }
+
+  function removeFamily(fam: Family) {
+    if (!window.confirm(`Delete "${fam.name}" and all ${fam.revisions.length} revision(s)?`)) return;
+    void run(async () => {
+      for (const b of fam.revisions) await jdel(`/api/boards/${b.id}`);
+    });
+  }
+
+  const active = groupByName(boards.filter((b) => !b.archived));
+  const archived = groupByName(boards.filter((b) => b.archived));
+
+  const pickedBoard = (fam: Family): Board =>
+    fam.revisions.find((r) => r.id === selected[fam.name]) ?? fam.revisions[0];
+
   return (
     <>
       <Nav />
@@ -135,7 +239,7 @@ export default function BoardsPage() {
             className="rounded-md border border-black/15 px-4 py-2 font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/[0.04]"
             disabled={busy}
           >
-            {busy ? "Importing…" : "Import BOM (.json)"}
+            {busy ? "Working…" : "Import BOM (.json)"}
           </button>
           <input
             ref={fileRef}
@@ -147,25 +251,148 @@ export default function BoardsPage() {
         </div>
         <p className="mb-6 text-sm text-black/50 dark:text-white/50">
           Import the <code>.json</code> from Fusion&rsquo;s <code>extract-bom.ulp</code> — it
-          creates (or updates) the board and opens it.
+          creates (or updates) the board and opens it. Same name, different revision = a new
+          revision under that board.
         </p>
 
-        {boards.length === 0 ? (
+        {active.length === 0 ? (
           <p className="text-sm text-black/60 dark:text-white/60">No boards yet.</p>
         ) : (
-          <ul className="divide-y divide-black/10 rounded-xl border border-black/10 dark:divide-white/10 dark:border-white/15">
-            {boards.map((b) => (
-              <li key={b.id}>
-                <Link
-                  href={`/boards/${b.id}`}
-                  className="flex items-center justify-between px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          <ul className="space-y-3">
+            {active.map((fam) => {
+              const sel = pickedBoard(fam);
+              const editingName = edit?.id === sel.id && edit.field === "name";
+              const editingRev = edit?.id === sel.id && edit.field === "revision";
+              return (
+                <li
+                  key={fam.name}
+                  className="rounded-xl border border-black/10 p-4 dark:border-white/15"
                 >
-                  <span className="font-medium">{b.name}</span>
-                  <span className="text-sm text-black/50 dark:text-white/50">Open →</span>
-                </Link>
-              </li>
-            ))}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                    {editingName ? (
+                      <InlineEdit
+                        initial={fam.name}
+                        placeholder="board name"
+                        busy={busy}
+                        onSave={(v) => v && run(() => jpatch(`/api/boards/${sel.id}`, { name: v }))}
+                        onCancel={() => setEdit(null)}
+                      />
+                    ) : (
+                      <Link
+                        href={`/boards/${sel.id}`}
+                        className="text-lg font-medium tracking-tight hover:underline"
+                      >
+                        {fam.name}
+                      </Link>
+                    )}
+
+                    {editingRev ? (
+                      <InlineEdit
+                        initial={sel.revision}
+                        placeholder="revision (e.g. Rev B)"
+                        busy={busy}
+                        onSave={(v) => run(() => jpatch(`/api/boards/${sel.id}`, { revision: v }))}
+                        onCancel={() => setEdit(null)}
+                      />
+                    ) : fam.revisions.length > 1 ? (
+                      <select
+                        className={inputCls}
+                        value={sel.id}
+                        onChange={(e) =>
+                          setSelected((p) => ({ ...p, [fam.name]: Number(e.target.value) }))
+                        }
+                      >
+                        {fam.revisions.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.revision || "(no revision)"}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="text-sm text-black/50 dark:text-white/50">
+                        {sel.revision || "(no revision)"}
+                      </span>
+                    )}
+
+                    {!editingName && !editingRev && (
+                      <span className="ml-auto flex flex-wrap items-center gap-2">
+                        <Link href={`/boards/${sel.id}`} className={btnSm}>
+                          Open →
+                        </Link>
+                        <button
+                          className={btnSm}
+                          disabled={busy}
+                          onClick={() => setEdit({ id: sel.id, field: "name" })}
+                        >
+                          Rename
+                        </button>
+                        <button
+                          className={btnSm}
+                          disabled={busy}
+                          onClick={() => setEdit({ id: sel.id, field: "revision" })}
+                        >
+                          Edit rev
+                        </button>
+                        <button
+                          className={btnSm}
+                          disabled={busy}
+                          onClick={() => run(() => jpatch(`/api/boards/${sel.id}`, { archived: true }))}
+                        >
+                          Archive
+                        </button>
+                        <button
+                          className={`${btnSm} text-red-600 dark:text-red-400`}
+                          disabled={busy}
+                          onClick={() => removeRevision(sel)}
+                        >
+                          Delete
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
+        )}
+
+        {archived.length > 0 && (
+          <details className="mt-6 rounded-xl border border-black/10 dark:border-white/15">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-black/60 dark:text-white/60">
+              Archived ({archived.length})
+            </summary>
+            <ul className="divide-y divide-black/10 border-t border-black/10 dark:divide-white/10 dark:border-white/15">
+              {archived.map((fam) => (
+                <li
+                  key={fam.name}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 text-sm"
+                >
+                  <span className="font-medium">{fam.name}</span>
+                  <span className="text-black/40 dark:text-white/40">
+                    {fam.revisions.length} revision(s)
+                  </span>
+                  <span className="ml-auto flex gap-2">
+                    <button
+                      className={btnSm}
+                      disabled={busy}
+                      onClick={() =>
+                        run(() => jpatch(`/api/boards/${fam.revisions[0].id}`, { archived: false }))
+                      }
+                    >
+                      Unarchive
+                    </button>
+                    <button
+                      className={`${btnSm} text-red-600 dark:text-red-400`}
+                      disabled={busy}
+                      onClick={() => removeFamily(fam)}
+                    >
+                      Delete
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
       </main>
     </>

@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import { Nav } from "@/components/Nav";
 import { jget, jpost, jput } from "@/lib/client";
+import { bomToText, parseBomText } from "@/lib/domain/bomText";
 
 interface BomRow {
   id: number;
@@ -41,36 +42,10 @@ interface BuildRow {
   completedAt: string | null;
 }
 
-interface BomLineInput {
-  partMpn: string | null;
-  value: string;
-  package: string;
-  designators: string;
-  qtyPerBoard: number;
-}
-
-// One line per part: "MPN, qty, value, package, designators" (only MPN + qty required).
-function parseBom(text: string): BomLineInput[] {
-  return text
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [mpn, qty, value, pkg, des] = line.split(",").map((s) => s.trim());
-      return {
-        partMpn: mpn || null,
-        qtyPerBoard: Math.max(1, parseInt(qty || "1", 10) || 1),
-        value: value ?? "",
-        package: pkg ?? "",
-        designators: des ?? "",
-      };
-    });
-}
-
-function bomToText(rows: BomRow[]): string {
-  return rows
-    .map((r) => [r.partMpn ?? "", r.qtyPerBoard, r.value, r.package, r.designators].join(", "))
-    .join("\n");
+// Real-MPN shortage keys only (not the synthetic "value|package" / "line-N"
+// used for unmatched lines) — these are the parts that can be consumed/restored.
+function isMpnKey(partKey: string): boolean {
+  return !partKey.includes("|") && !partKey.startsWith("line-");
 }
 
 function fmtDate(iso: string): string {
@@ -86,6 +61,7 @@ const btnClass =
 export default function BoardDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [boardName, setBoardName] = useState("");
+  const [boardRev, setBoardRev] = useState("");
   const [bomText, setBomText] = useState("");
   const [count, setCount] = useState("10");
   const [report, setReport] = useState<ShortageReport | null>(null);
@@ -95,18 +71,22 @@ export default function BoardDetailPage() {
   const [busy, setBusy] = useState(false);
   const [buildList, setBuildList] = useState<BuildRow[]>([]);
   const [buildMsg, setBuildMsg] = useState("");
+  // Shortage lines (by partKey) ticked for build/cancel; reset to all on each check.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let active = true;
     void (async () => {
       try {
         const [boardList, bom, blds] = await Promise.all([
-          jget<{ id: number; name: string }[]>("/api/boards"),
+          jget<{ id: number; name: string; revision: string }[]>("/api/boards"),
           jget<BomRow[]>(`/api/boards/${id}/bom`),
           jget<BuildRow[]>(`/api/boards/${id}/builds`),
         ]);
         if (!active) return;
-        setBoardName(boardList.find((b) => String(b.id) === String(id))?.name ?? `Board ${id}`);
+        const me = boardList.find((b) => String(b.id) === String(id));
+        setBoardName(me?.name ?? `Board ${id}`);
+        setBoardRev(me?.revision ?? "");
         setBomText(bomToText(bom));
         setBuildList(blds);
       } catch (e) {
@@ -123,7 +103,9 @@ export default function BoardDetailPage() {
     setError("");
     setSavedMsg("");
     try {
-      const r = await jput<{ count: number }>(`/api/boards/${id}/bom`, { lines: parseBom(bomText) });
+      const r = await jput<{ count: number }>(`/api/boards/${id}/bom`, {
+        lines: parseBomText(bomText),
+      });
       setSavedMsg(`Saved ${r.count} BOM lines.`);
       setReport(null);
     } catch (e) {
@@ -138,12 +120,35 @@ export default function BoardDetailPage() {
     setError("");
     setBatchMsg("");
     try {
-      setReport(await jget<ShortageReport>(`/api/boards/${id}/shortage?count=${Number(count) || 0}`));
+      const rep = await jget<ShortageReport>(`/api/boards/${id}/shortage?count=${Number(count) || 0}`);
+      setReport(rep);
+      setSelected(new Set(rep.lines.map((l) => l.partKey))); // default: everything ticked
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed.");
     } finally {
       setBusy(false);
     }
+  }
+
+  // The ticked, MPN-matched shortage lines — the parts a build/cancel acts on.
+  function selectedMpns(): string[] {
+    if (!report) return [];
+    return report.lines
+      .filter((l) => selected.has(l.partKey) && isMpnKey(l.partKey))
+      .map((l) => l.partKey);
+  }
+
+  function toggleLine(partKey: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(partKey)) next.delete(partKey);
+      else next.add(partKey);
+      return next;
+    });
+  }
+
+  function toggleAll(checked: boolean) {
+    setSelected(checked && report ? new Set(report.lines.map((l) => l.partKey)) : new Set());
   }
 
   async function refreshBuilds() {
@@ -160,24 +165,64 @@ export default function BoardDetailPage() {
       setBuildMsg("Enter how many boards to build.");
       return;
     }
+    if (!report) {
+      setBuildMsg("Run 'Check shortage' first, then tick the parts to consume.");
+      return;
+    }
+    const parts = selectedMpns();
+    if (parts.length === 0) {
+      setBuildMsg("Tick at least one tracked part (one with an MPN) to consume.");
+      return;
+    }
     setBusy(true);
     setBuildMsg("");
     try {
       const r = await jpost<{ consumed: { mpn: string }[]; untracked: number }>(
         `/api/boards/${id}/build`,
-        { quantity: qty },
+        { quantity: qty, parts },
       );
-      setBuildMsg(
-        `Built ${qty} — consumed ${r.consumed.length} part type(s)` +
-          (r.untracked ? `, ${r.untracked} untracked (no MPN).` : "."),
-      );
+      setBuildMsg(`Built ${qty} — consumed ${r.consumed.length} selected part type(s).`);
       await refreshBuilds();
       await check(); // re-run shortage to show updated stock
     } catch (e) {
       if (e instanceof Error && e.message === "insufficient stock") {
-        setBuildMsg("Not enough stock — run 'Check shortage' to see what's missing.");
+        setBuildMsg("Not enough stock for a ticked part — see the Short column.");
       } else {
         setBuildMsg(e instanceof Error ? e.message : "Build failed.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelBuild() {
+    if (!report) {
+      setBuildMsg("Run 'Check shortage' first, then tick the parts to restore.");
+      return;
+    }
+    const parts = selectedMpns();
+    if (parts.length === 0) {
+      setBuildMsg("Tick at least one tracked part to restore.");
+      return;
+    }
+    setBusy(true);
+    setBuildMsg("");
+    try {
+      const r = await jpost<{ buildId: number; reversed: { mpn: string }[]; fullyCancelled: boolean }>(
+        `/api/boards/${id}/build/cancel`,
+        { parts },
+      );
+      setBuildMsg(
+        `Restored ${r.reversed.length} part type(s) to stock (reversed build #${r.buildId}` +
+          (r.fullyCancelled ? ", now fully cancelled)." : ")."),
+      );
+      await refreshBuilds();
+      await check();
+    } catch (e) {
+      if (e instanceof Error && e.message === "no build to cancel") {
+        setBuildMsg("No matching build to cancel — the ticked parts weren't in the last build.");
+      } else {
+        setBuildMsg(e instanceof Error ? e.message : "Cancel failed.");
       }
     } finally {
       setBusy(false);
@@ -209,7 +254,14 @@ export default function BoardDetailPage() {
     <>
       <Nav />
       <main className="mx-auto w-full max-w-5xl flex-1 p-6">
-        <h1 className="mb-1 text-2xl font-semibold tracking-tight">{boardName || "Board"}</h1>
+        <h1 className="mb-1 text-2xl font-semibold tracking-tight">
+          {boardName || "Board"}
+          {boardRev && (
+            <span className="ml-2 align-middle text-base font-normal text-black/50 dark:text-white/50">
+              {boardRev}
+            </span>
+          )}
+        </h1>
         <p className="mb-6 text-sm text-black/60 dark:text-white/60">
           Paste the BOM, then check how many you can build and what to buy.
         </p>
@@ -263,10 +315,30 @@ export default function BoardDetailPage() {
             >
               Build &amp; consume
             </button>
+            <button
+              className="rounded-md border border-black/15 px-4 py-2 font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/[0.04]"
+              onClick={cancelBuild}
+              disabled={busy}
+            >
+              Cancel build
+            </button>
           </div>
+          <p className="mt-2 text-xs text-black/45 dark:text-white/45">
+            Check shortage first, then tick parts. Build &amp; consume draws only the ticked parts;
+            Cancel build restores the ticked parts from the most recent build.
+          </p>
           {buildMsg && <p className="mt-2 text-sm text-black/70 dark:text-white/70">{buildMsg}</p>}
 
-          {report && <ShortageView report={report} onDigikeyBatch={digikeyBatch} batchMsg={batchMsg} />}
+          {report && (
+            <ShortageView
+              report={report}
+              selected={selected}
+              onToggle={toggleLine}
+              onToggleAll={toggleAll}
+              onDigikeyBatch={digikeyBatch}
+              batchMsg={batchMsg}
+            />
+          )}
 
           {buildList.length > 0 && (
             <div className="mt-6">
@@ -274,7 +346,12 @@ export default function BoardDetailPage() {
               <ul className="divide-y divide-black/10 rounded-lg border border-black/10 text-sm dark:divide-white/10 dark:border-white/15">
                 {buildList.map((b) => (
                   <li key={b.id} className="flex items-center justify-between px-3 py-2">
-                    <span>{b.quantity} board(s)</span>
+                    <span>
+                      {b.quantity} board(s)
+                      {b.status === "cancelled" && (
+                        <span className="ml-2 text-amber-600 dark:text-amber-400">cancelled</span>
+                      )}
+                    </span>
                     <span className="text-black/50 dark:text-white/50">
                       {fmtDate(b.completedAt ?? b.createdAt)}
                     </span>
@@ -291,13 +368,20 @@ export default function BoardDetailPage() {
 
 function ShortageView({
   report,
+  selected,
+  onToggle,
+  onToggleAll,
   onDigikeyBatch,
   batchMsg,
 }: {
   report: ShortageReport;
+  selected: Set<string>;
+  onToggle: (partKey: string) => void;
+  onToggleAll: (checked: boolean) => void;
   onDigikeyBatch: () => void;
   batchMsg: string;
 }) {
+  const allChecked = report.lines.length > 0 && report.lines.every((l) => selected.has(l.partKey));
   return (
     <div className="mt-5">
       <p className="mb-4 text-sm">
@@ -319,6 +403,14 @@ function ShortageView({
           <table className="w-full text-left text-sm">
             <thead className="text-black/50 dark:text-white/50">
               <tr className="border-b border-black/10 dark:border-white/15">
+                <th className="py-2 pr-3">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all parts"
+                    checked={allChecked}
+                    onChange={(e) => onToggleAll(e.target.checked)}
+                  />
+                </th>
                 <th className="py-2 pr-4 font-medium">Part</th>
                 <th className="py-2 pr-4 text-right font-medium">Per board</th>
                 <th className="py-2 pr-4 text-right font-medium">Required</th>
@@ -329,6 +421,14 @@ function ShortageView({
             <tbody>
               {report.lines.map((l) => (
                 <tr key={l.partKey} className="border-b border-black/5 dark:border-white/10">
+                  <td className="py-2 pr-3">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${l.partKey}`}
+                      checked={selected.has(l.partKey)}
+                      onChange={() => onToggle(l.partKey)}
+                    />
+                  </td>
                   <td className="py-2 pr-4">
                     <span className="font-mono">{l.partKey}</span>
                     {l.reference && (

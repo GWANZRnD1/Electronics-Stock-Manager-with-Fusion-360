@@ -6,6 +6,7 @@
  */
 import { sql } from "drizzle-orm";
 import {
+  boolean,
   index,
   integer,
   numeric,
@@ -95,6 +96,8 @@ export const boards = pgTable(
     name: text("name").notNull(),
     fusionDocId: text("fusion_doc_id"),
     revision: text("revision").notNull().default(""),
+    // Archived boards collapse out of the main list (kept, not deleted).
+    archived: boolean("archived").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("boards_fusion_doc_idx").on(t.fusionDocId)],

@@ -1,8 +1,8 @@
 /** Boards, their BOM lines, and shortage computation (uses the indexed stock sum). */
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { getDb } from "@/lib/db";
-import { boards, bomLines, parts, stockItems } from "@/lib/db/schema";
+import { boards, bomLines, buildConsumptions, builds, parts, stockItems } from "@/lib/db/schema";
 import { type BomLine, computeShortage, type ShortageReport } from "@/lib/domain/shortage";
 
 export function listBoards() {
@@ -14,38 +14,45 @@ export async function createBoard(input: { name: string }) {
   return row;
 }
 
-/** Find a board by Fusion doc id (preferred) or name, updating it; create if absent. */
+/**
+ * Find a board by Fusion doc id (preferred) or by name + revision, updating it;
+ * create if absent. A re-import always un-archives the board. Distinct revisions
+ * of the same name coexist as separate rows (grouped by name in the UI), so
+ * importing a board whose revision differs creates a new revision rather than
+ * overwriting the old one.
+ */
 export async function upsertBoard(input: {
   name: string;
   fusionDocId?: string | null;
   revision?: string;
 }) {
   const db = getDb();
+  const revision = input.revision ?? "";
 
   if (input.fusionDocId) {
     const [byDoc] = await db.select().from(boards).where(eq(boards.fusionDocId, input.fusionDocId));
     if (byDoc) {
-      const revision = input.revision ?? byDoc.revision;
-      await db.update(boards).set({ name: input.name, revision }).where(eq(boards.id, byDoc.id));
-      return { ...byDoc, name: input.name, revision };
+      await db
+        .update(boards)
+        .set({ name: input.name, revision, archived: false })
+        .where(eq(boards.id, byDoc.id));
+      return { ...byDoc, name: input.name, revision, archived: false };
     }
   }
 
-  const [byName] = await db.select().from(boards).where(eq(boards.name, input.name));
-  if (byName) {
-    const fusionDocId = input.fusionDocId ?? byName.fusionDocId;
-    const revision = input.revision ?? byName.revision;
-    await db.update(boards).set({ fusionDocId, revision }).where(eq(boards.id, byName.id));
-    return { ...byName, fusionDocId, revision };
+  const [match] = await db
+    .select()
+    .from(boards)
+    .where(and(eq(boards.name, input.name), eq(boards.revision, revision)));
+  if (match) {
+    const fusionDocId = input.fusionDocId ?? match.fusionDocId;
+    await db.update(boards).set({ fusionDocId, archived: false }).where(eq(boards.id, match.id));
+    return { ...match, fusionDocId, archived: false };
   }
 
   const [created] = await db
     .insert(boards)
-    .values({
-      name: input.name,
-      fusionDocId: input.fusionDocId ?? null,
-      revision: input.revision ?? "",
-    })
+    .values({ name: input.name, fusionDocId: input.fusionDocId ?? null, revision })
     .returning();
   return created;
 }
@@ -53,6 +60,42 @@ export async function upsertBoard(input: {
 export async function getBoard(id: number) {
   const [row] = await getDb().select().from(boards).where(eq(boards.id, id));
   return row ?? null;
+}
+
+/** Relabel a single revision (one board row). */
+export async function updateBoardRevision(id: number, revision: string) {
+  await getDb().update(boards).set({ revision }).where(eq(boards.id, id));
+}
+
+/** Rename the whole family — every revision sharing this board's current name. */
+export async function renameBoardFamily(id: number, name: string) {
+  const db = getDb();
+  const current = await getBoard(id);
+  if (!current) return;
+  await db.update(boards).set({ name }).where(eq(boards.name, current.name));
+}
+
+/** Archive/unarchive the whole family (every revision under this board's name). */
+export async function setBoardFamilyArchived(id: number, archived: boolean) {
+  const db = getDb();
+  const current = await getBoard(id);
+  if (!current) return;
+  await db.update(boards).set({ archived }).where(eq(boards.name, current.name));
+}
+
+/** Delete one revision and everything that hangs off it (BOM, builds, consumptions). */
+export async function deleteBoard(id: number) {
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    const buildRows = await tx.select({ id: builds.id }).from(builds).where(eq(builds.boardId, id));
+    const buildIds = buildRows.map((b) => b.id);
+    if (buildIds.length > 0) {
+      await tx.delete(buildConsumptions).where(inArray(buildConsumptions.buildId, buildIds));
+    }
+    await tx.delete(builds).where(eq(builds.boardId, id));
+    await tx.delete(bomLines).where(eq(bomLines.boardId, id));
+    await tx.delete(boards).where(eq(boards.id, id));
+  });
 }
 
 export function getBoardBom(boardId: number) {

@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 
 import { getBoard } from "@/lib/repo/boards";
-import { BuildShortageError, buildBoard } from "@/lib/repo/builds";
-import { buildSchema } from "@/lib/validation";
+import { cancelLastBuild, NoBuildError } from "@/lib/repo/builds";
+import { cancelBuildSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/** Reverse the board's most recent build, restoring stock for the chosen parts. */
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const boardId = Number((await params).id);
   if (!Number.isInteger(boardId)) {
@@ -15,21 +16,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (!(await getBoard(boardId))) {
     return NextResponse.json({ error: "board not found" }, { status: 404 });
   }
-  const parsed = buildSchema.safeParse(await request.json().catch(() => null));
+  const parsed = cancelBuildSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json({ error: "invalid request" }, { status: 400 });
   }
   try {
-    const result = await buildBoard(
-      boardId,
-      parsed.data.quantity,
-      parsed.data.actor ?? "",
-      parsed.data.parts,
-    );
-    return NextResponse.json(result, { status: 201 });
+    const result = await cancelLastBuild(boardId, parsed.data.parts, parsed.data.actor ?? "");
+    return NextResponse.json(result);
   } catch (e) {
-    if (e instanceof BuildShortageError) {
-      return NextResponse.json({ error: "insufficient stock", shortages: e.shortages }, { status: 409 });
+    if (e instanceof NoBuildError) {
+      return NextResponse.json({ error: "no build to cancel" }, { status: 409 });
     }
     throw e;
   }

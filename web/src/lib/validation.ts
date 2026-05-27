@@ -69,6 +69,14 @@ export const createBoardSchema = z.object({
   name: z.string().trim().min(1).max(128),
 });
 
+export const updateBoardSchema = z
+  .object({
+    name: z.string().trim().min(1).max(128).optional(), // renames the whole board family
+    revision: z.string().trim().max(64).optional(), // relabels just this revision
+    archived: z.boolean().optional(), // archive/unarchive the whole family
+  })
+  .refine((d) => Object.keys(d).length > 0, { message: "no fields to update" });
+
 export const bomLineInputSchema = z.object({
   partMpn: z.string().trim().max(128).optional().nullable(),
   value: z.string().trim().max(128).optional(),
@@ -81,9 +89,18 @@ export const replaceBomSchema = z.object({
   lines: z.array(bomLineInputSchema).max(5_000),
 });
 
+// MPNs (shortage partKeys) to act on; omitted/empty means "all tracked parts".
+const partKeysSchema = z.array(z.string().trim().min(1)).max(5_000).optional();
+
 export const buildSchema = z.object({
   quantity: z.number().int().positive().max(100_000),
   actor: z.string().trim().max(64).optional(),
+  parts: partKeysSchema, // consume only these MPNs (all if omitted)
+});
+
+export const cancelBuildSchema = z.object({
+  actor: z.string().trim().max(64).optional(),
+  parts: partKeysSchema, // restore only these MPNs from the last build (all if omitted)
 });
 
 export const librarySyncSchema = z.object({
