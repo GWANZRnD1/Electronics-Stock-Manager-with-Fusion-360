@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { Nav } from "@/components/Nav";
@@ -23,8 +23,19 @@ interface ShortageLine {
   available: number;
   shortage: number;
   reference: string;
+  supplier?: string;
+  bucket?: BuyBucket;
   buyLinks?: { digikey: string; mouser: string; lcsc: string } | null;
 }
+
+type BuyBucket = "digikey" | "mouser" | "lcsc" | "others";
+
+const BUCKETS: { key: BuyBucket; label: string }[] = [
+  { key: "digikey", label: "DigiKey" },
+  { key: "mouser", label: "Mouser" },
+  { key: "lcsc", label: "LCSC" },
+  { key: "others", label: "Others" },
+];
 
 interface ShortageReport {
   boardCount: number;
@@ -60,8 +71,10 @@ const btnClass =
 
 export default function BoardDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const [boardName, setBoardName] = useState("");
   const [boardRev, setBoardRev] = useState("");
+  const [siblings, setSiblings] = useState<{ id: number; revision: string }[]>([]);
   const [bomText, setBomText] = useState("");
   const [count, setCount] = useState("10");
   const [report, setReport] = useState<ShortageReport | null>(null);
@@ -87,6 +100,14 @@ export default function BoardDetailPage() {
         const me = boardList.find((b) => String(b.id) === String(id));
         setBoardName(me?.name ?? `Board ${id}`);
         setBoardRev(me?.revision ?? "");
+        setSiblings(
+          me
+            ? boardList
+                .filter((b) => b.name === me.name)
+                .map((b) => ({ id: b.id, revision: b.revision }))
+                .sort((a, b) => a.id - b.id)
+            : [],
+        );
         setBomText(bomToText(bom));
         setBuildList(blds);
       } catch (e) {
@@ -261,18 +282,19 @@ export default function BoardDetailPage() {
 
   async function digikeyBatch() {
     if (!report) return;
+    // Only DigiKey-group parts go into the batch (by MPN; DigiKey resolves them).
     const items = report.shortages
-      .filter((s) => s.buyLinks)
+      .filter((s) => s.bucket === "digikey" && s.buyLinks)
       .map((s) => ({ partNumber: s.partKey, quantity: s.shortage }));
     if (items.length === 0) {
-      setBatchMsg("No MPN-matched shortages to batch.");
+      setBatchMsg("No DigiKey-group shortages to batch.");
       return;
     }
     setBatchMsg("Building DigiKey list…");
     try {
       const r = await jpost<{ url: string }>("/api/buy/digikey-batch", { items });
       window.open(r.url, "_blank", "noopener");
-      setBatchMsg("Opened a DigiKey list (with all shortages) in a new tab.");
+      setBatchMsg(`Opened a DigiKey list (${items.length} part type(s)) in a new tab.`);
     } catch (e) {
       setBatchMsg(
         `DigiKey batch unavailable (${e instanceof Error ? e.message : "error"}). Use per-part links below.`,
@@ -284,14 +306,27 @@ export default function BoardDetailPage() {
     <>
       <Nav />
       <main className="mx-auto w-full max-w-5xl flex-1 p-6">
-        <h1 className="mb-1 text-2xl font-semibold tracking-tight">
-          {boardName || "Board"}
-          {boardRev && (
-            <span className="ml-2 align-middle text-base font-normal text-black/50 dark:text-white/50">
-              {boardRev}
-            </span>
+        <div className="mb-1 flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-semibold tracking-tight">{boardName || "Board"}</h1>
+          {siblings.length > 1 ? (
+            <select
+              className="rounded-md border border-black/15 bg-transparent px-2 py-1 text-sm outline-none focus:border-blue-500 dark:border-white/20"
+              value={id}
+              onChange={(e) => router.push(`/boards/${e.target.value}`)}
+              aria-label="Switch revision"
+            >
+              {siblings.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.revision || "(no revision)"}
+                </option>
+              ))}
+            </select>
+          ) : (
+            boardRev && (
+              <span className="text-base font-normal text-black/50 dark:text-white/50">{boardRev}</span>
+            )
           )}
-        </h1>
+        </div>
         <p className="mb-6 text-sm text-black/60 dark:text-white/60">
           Paste the BOM, then check how many you can build and what to buy.
         </p>
@@ -484,35 +519,86 @@ function ShortageView({
 
       {report.shortages.length > 0 && (
         <div className="mt-6 rounded-lg border border-black/10 p-4 dark:border-white/15">
-          <div className="mb-3 flex flex-wrap items-center gap-3">
+          <div className="mb-4 flex flex-wrap items-center gap-3">
             <h3 className="font-medium">Buy shortages</h3>
-            <button
-              className="rounded-md bg-[#cc0000] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#b30000]"
-              onClick={onDigikeyBatch}
-            >
-              DigiKey batch list →
-            </button>
+            {report.shortages.some((s) => s.bucket === "digikey") && (
+              <button
+                className="rounded-md bg-[#cc0000] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#b30000]"
+                onClick={onDigikeyBatch}
+              >
+                DigiKey batch list →
+              </button>
+            )}
             {batchMsg && <span className="text-sm text-black/60 dark:text-white/60">{batchMsg}</span>}
           </div>
-          <ul className="space-y-2 text-sm">
-            {report.shortages.map((s) => (
-              <li key={s.partKey} className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span className="font-mono">{s.partKey}</span>
-                <span className="text-black/50 dark:text-white/50">need {s.shortage}</span>
-                {s.buyLinks ? (
-                  <span className="flex gap-2">
-                    <a className="text-blue-600 hover:underline dark:text-blue-400" href={s.buyLinks.digikey} target="_blank" rel="noopener">DigiKey</a>
-                    <a className="text-blue-600 hover:underline dark:text-blue-400" href={s.buyLinks.mouser} target="_blank" rel="noopener">Mouser</a>
-                    <a className="text-blue-600 hover:underline dark:text-blue-400" href={s.buyLinks.lcsc} target="_blank" rel="noopener">LCSC</a>
-                  </span>
-                ) : (
-                  <span className="text-amber-600 dark:text-amber-400">no MPN — match needed</span>
-                )}
-              </li>
-            ))}
-          </ul>
+          <div className="space-y-4">
+            {BUCKETS.map(({ key, label }) => {
+              const items = report.shortages.filter((s) => (s.bucket ?? "others") === key);
+              if (items.length === 0) return null;
+              return (
+                <div key={key}>
+                  <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-black/45 dark:text-white/45">
+                    {label} <span className="font-normal">({items.length})</span>
+                  </h4>
+                  <ul className="space-y-2 text-sm">
+                    {items.map((s) => (
+                      <li key={s.partKey} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span className="font-mono">{s.partKey}</span>
+                        <span className="text-black/50 dark:text-white/50">need {s.shortage}</span>
+                        <BuyLinks bucket={key} links={s.buyLinks} />
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+function BuyLinks({
+  bucket,
+  links,
+}: {
+  bucket: BuyBucket;
+  links?: { digikey: string; mouser: string; lcsc: string } | null;
+}) {
+  if (!links) {
+    return <span className="text-amber-600 dark:text-amber-400">no MPN — match needed</span>;
+  }
+  const cls = "text-blue-600 hover:underline dark:text-blue-400";
+  if (bucket === "digikey")
+    return (
+      <a className={cls} href={links.digikey} target="_blank" rel="noopener">
+        DigiKey →
+      </a>
+    );
+  if (bucket === "mouser")
+    return (
+      <a className={cls} href={links.mouser} target="_blank" rel="noopener">
+        Mouser →
+      </a>
+    );
+  if (bucket === "lcsc")
+    return (
+      <a className={cls} href={links.lcsc} target="_blank" rel="noopener">
+        LCSC →
+      </a>
+    );
+  return (
+    <span className="flex gap-2">
+      <a className={cls} href={links.digikey} target="_blank" rel="noopener">
+        DigiKey
+      </a>
+      <a className={cls} href={links.mouser} target="_blank" rel="noopener">
+        Mouser
+      </a>
+      <a className={cls} href={links.lcsc} target="_blank" rel="noopener">
+        LCSC
+      </a>
+    </span>
   );
 }

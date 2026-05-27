@@ -1,11 +1,33 @@
 /** Build distributor product/search URLs and batch-purchase payloads. Pure, no I/O. */
 
-export const DIGIKEY_BASE = "https://www.digikey.com";
+// DigiKey New Zealand storefront. The MyLists short URLs are region-specific, so
+// the batch endpoint must be the .co.nz one too (a .com short code 404s on .co.nz).
+export const DIGIKEY_BASE = "https://www.digikey.co.nz";
 export const MOUSER_BASE = "https://www.mouser.com";
 export const LCSC_BASE = "https://www.lcsc.com";
 
 // Keyless batch endpoint: POST returns a single-use URL preloaded with the BOM.
-export const DIGIKEY_MYLISTS_ENDPOINT = "https://www.digikey.com/mylists/api/thirdparty";
+export const DIGIKEY_MYLISTS_ENDPOINT = "https://www.digikey.co.nz/mylists/api/thirdparty";
+
+/**
+ * Where a part is bought, derived from its catalog `supplier`. Jellybeans (and
+ * plain "digikey") go to DigiKey; unknown/empty/other suppliers fall to Others.
+ */
+export type BuyBucket = "digikey" | "mouser" | "lcsc" | "others";
+
+export function buyBucket(supplier: string | null | undefined): BuyBucket {
+  switch ((supplier ?? "").trim().toLowerCase()) {
+    case "digikey":
+    case "jellybean":
+      return "digikey";
+    case "mouser":
+      return "mouser";
+    case "lcsc":
+      return "lcsc";
+    default:
+      return "others";
+  }
+}
 
 export interface MyListsItem {
   requestedPartNumber: string;

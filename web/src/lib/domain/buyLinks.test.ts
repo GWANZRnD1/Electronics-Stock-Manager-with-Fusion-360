@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buyBucket,
   digikeyMylistsPayload,
   digikeySearchUrl,
   lcscProductUrl,
@@ -9,9 +10,9 @@ import {
 } from "./buyLinks";
 
 describe("buy links", () => {
-  it("encodes the DigiKey search query", () => {
+  it("encodes the DigiKey (NZ) search query", () => {
     expect(digikeySearchUrl("MCP2221A-I/SL")).toBe(
-      "https://www.digikey.com/en/products/result?keywords=MCP2221A-I%2FSL",
+      "https://www.digikey.co.nz/en/products/result?keywords=MCP2221A-I%2FSL",
     );
   });
 
@@ -50,5 +51,24 @@ describe("buy links", () => {
         ["VALID-ND", 2],
       ]),
     ).toEqual([{ requestedPartNumber: "VALID-ND", quantities: [{ quantity: 2 }] }]);
+  });
+});
+
+describe("buyBucket", () => {
+  it("routes digikey and jellybean to DigiKey", () => {
+    expect(buyBucket("DigiKey")).toBe("digikey");
+    expect(buyBucket("jellybean")).toBe("digikey");
+  });
+
+  it("routes mouser and lcsc to their own buckets", () => {
+    expect(buyBucket("Mouser")).toBe("mouser");
+    expect(buyBucket("LCSC")).toBe("lcsc");
+  });
+
+  it("routes unknown, empty, or other suppliers to Others", () => {
+    expect(buyBucket("")).toBe("others");
+    expect(buyBucket(null)).toBe("others");
+    expect(buyBucket(undefined)).toBe("others");
+    expect(buyBucket("Arrow")).toBe("others");
   });
 });

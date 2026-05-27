@@ -144,6 +144,18 @@ export async function replaceBom(boardId: number, lines: BomLineInput[]) {
   });
 }
 
+/** Catalog `supplier` per MPN (for routing shortages to a buy distributor). */
+export async function suppliersByMpns(mpns: string[]): Promise<Record<string, string>> {
+  if (mpns.length === 0) return {};
+  const rows = await getDb()
+    .select({ mpn: parts.mpn, supplier: parts.supplier })
+    .from(parts)
+    .where(inArray(parts.mpn, mpns));
+  const map: Record<string, string> = {};
+  for (const r of rows) map[r.mpn] = r.supplier;
+  return map;
+}
+
 /** Summed on-hand quantity per MPN (the indexed lookup we benchmarked at ~6ms/50k). */
 async function stockByMpns(mpns: string[]): Promise<Record<string, number>> {
   if (mpns.length === 0) return {};

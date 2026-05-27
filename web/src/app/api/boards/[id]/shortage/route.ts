@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 
 import {
+  buyBucket,
   digikeySearchUrl,
   lcscSearchUrl,
   mouserProductUrl,
 } from "@/lib/domain/buyLinks";
 import { hasShortage, maxBuildable, type ShortageLine } from "@/lib/domain/shortage";
-import { getBoard, getBoardShortage } from "@/lib/repo/boards";
+import { getBoard, getBoardShortage, suppliersByMpns } from "@/lib/repo/boards";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,9 +41,19 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   }
 
   const report = await getBoardShortage(boardId, count);
-  const shortages = report.lines
-    .filter((l) => l.shortage > 0)
-    .map((l) => ({ ...l, buyLinks: buyLinksFor(l) }));
+  const short = report.lines.filter((l) => l.shortage > 0);
+
+  // Route each shortage to a buy distributor by its catalog `supplier`.
+  const suppliers = await suppliersByMpns(short.filter((l) => isMpn(l.partKey)).map((l) => l.partKey));
+  const shortages = short.map((l) => {
+    const supplier = isMpn(l.partKey) ? (suppliers[l.partKey] ?? "") : "";
+    return {
+      ...l,
+      supplier,
+      bucket: isMpn(l.partKey) ? buyBucket(supplier) : "others",
+      buyLinks: buyLinksFor(l),
+    };
+  });
 
   return NextResponse.json({
     boardCount: report.boardCount,
