@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { digikeyConfigured } from "@/lib/distributors/digikey";
 import { mouserConfigured } from "@/lib/distributors/mouser";
-import { enrichableCount, enrichValues } from "@/lib/repo/inventory";
+import { refreshableCostCount, refreshCosts } from "@/lib/repo/inventory";
 import { enrichSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -12,12 +12,12 @@ function configured(): boolean {
   return digikeyConfigured() || mouserConfigured();
 }
 
-/** Status for the enrich UI: whether a distributor API is set, and how many parts lack a value. */
+/** Status: whether a distributor API is set, and how many DigiKey/Mouser parts can be refreshed. */
 export async function GET() {
-  return NextResponse.json({ configured: configured(), pending: await enrichableCount() });
+  return NextResponse.json({ configured: configured(), pending: await refreshableCostCount() });
 }
 
-/** Run one resumable enrichment batch. Refuses to run without a distributor API key. */
+/** Refresh one resumable batch of DigiKey/Mouser unit costs. Refuses to run without a key. */
 export async function POST(request: Request) {
   if (!configured()) {
     return NextResponse.json(
@@ -29,6 +29,5 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "invalid request" }, { status: 400 });
   }
-  const result = await enrichValues(parsed.data);
-  return NextResponse.json(result);
+  return NextResponse.json(await refreshCosts(parsed.data));
 }

@@ -9,7 +9,7 @@ import { getDb } from "@/lib/db";
 import { lookupPart } from "@/lib/distributors";
 import { inventoryTxns, locations, parts, stockItems } from "@/lib/db/schema";
 import { bundleCategories, categoryKey } from "@/lib/domain/categories";
-import { deriveField, deriveValue } from "@/lib/domain/enrich";
+import { deriveField, deriveValue, unitCostFromOffer } from "@/lib/domain/enrich";
 import type { NormalizedRow } from "@/lib/domain/inventoryCsv";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -585,6 +585,60 @@ export async function enrichValues(
     }
     if (Object.keys(patch).length > 0) {
       await db.update(parts).set({ ...patch, updatedAt: sql`now()` }).where(eq(parts.id, t.id));
+      updated++;
+    }
+    if (i < targets.length - 1) await sleep(delayMs);
+  }
+
+  return { processed: targets.length, updated, nextAfterId: targets.at(-1)?.id ?? null };
+}
+
+// Parts whose cost can be refreshed from a distributor API: DigiKey/Mouser with a real MPN.
+// (LCSC has no public API and unidentified-supplier parts are left untouched.)
+const refreshWhere = () =>
+  and(sql`lower(${parts.supplier}) in ('digikey', 'mouser')`, sql`${parts.mpn} <> ''`);
+
+/** Count of DigiKey/Mouser parts whose unit cost can be refreshed. */
+export async function refreshableCostCount(): Promise<number> {
+  const [row] = await getDb().select({ n: sql<number>`count(*)` }).from(parts).where(refreshWhere());
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * One resumable batch that refreshes unit cost (USD) from the part's own
+ * distributor (DigiKey or Mouser) using current price breaks. Sweeps by ascending
+ * id; only overwrites cost when a USD price is found, so a failed/empty lookup
+ * never wipes an existing cost. Throttled between lookups.
+ */
+export async function refreshCosts(
+  opts: { limit?: number; delayMs?: number; afterId?: number } = {},
+): Promise<EnrichBatchResult> {
+  const limit = Math.min(Math.max(opts.limit ?? 25, 1), 200);
+  const delayMs = opts.delayMs ?? 300;
+  const afterId = opts.afterId ?? 0;
+  const db = getDb();
+
+  const targets = await db
+    .select({ id: parts.id, mpn: parts.mpn, supplier: parts.supplier })
+    .from(parts)
+    .where(and(refreshWhere(), sql`${parts.id} > ${afterId}`))
+    .orderBy(parts.id)
+    .limit(limit);
+
+  let updated = 0;
+  for (let i = 0; i < targets.length; i++) {
+    const t = targets[i];
+    let offers;
+    try {
+      ({ offers } = await lookupPart(t.mpn));
+    } catch {
+      continue;
+    }
+    const want = t.supplier.toLowerCase(); // "digikey" | "mouser"
+    const offer = offers.find((o) => !o.mock && o.distributor === want);
+    const cost = offer ? unitCostFromOffer(offer) : null;
+    if (cost !== null) {
+      await db.update(parts).set({ unitCost: money(cost), updatedAt: sql`now()` }).where(eq(parts.id, t.id));
       updated++;
     }
     if (i < targets.length - 1) await sleep(delayMs);

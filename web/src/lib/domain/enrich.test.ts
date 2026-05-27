@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { DistributorOffer } from "../distributors/types";
-import { deriveField, deriveValue } from "./enrich";
+import { deriveField, deriveValue, unitCostFromOffer } from "./enrich";
 
 function offer(o: Partial<DistributorOffer>): DistributorOffer {
   return {
@@ -51,5 +51,23 @@ describe("deriveField", () => {
     expect(deriveField(offers, "category")).toBe("Capacitors");
     expect(deriveField([offer({ package: "0402" })], "package")).toBe("0402");
     expect(deriveField([offer({})], "category")).toBe("");
+  });
+});
+
+describe("unitCostFromOffer", () => {
+  const pb = (quantity: number, unitPrice: number, currency = "USD") => ({ quantity, unitPrice, currency });
+
+  it("takes the unit price at the smallest break quantity", () => {
+    expect(unitCostFromOffer(offer({ priceBreaks: [pb(10, 0.05), pb(1, 0.1), pb(100, 0.03)] }))).toBe(0.1);
+  });
+
+  it("ignores non-USD breaks", () => {
+    expect(unitCostFromOffer(offer({ priceBreaks: [pb(1, 0.2, "NZD")] }))).toBeNull();
+    expect(unitCostFromOffer(offer({ priceBreaks: [pb(1, 0.2, "NZD"), pb(5, 0.15, "USD")] }))).toBe(0.15);
+  });
+
+  it("returns null when there are no usable price breaks", () => {
+    expect(unitCostFromOffer(offer({ priceBreaks: [] }))).toBeNull();
+    expect(unitCostFromOffer(offer({ priceBreaks: [pb(1, 0)] }))).toBeNull();
   });
 });

@@ -30,3 +30,16 @@ export function deriveField(offers: DistributorOffer[], field: "category" | "pac
   }
   return "";
 }
+
+/**
+ * Unit cost (in USD) from a distributor offer's price breaks — the price at the
+ * smallest break quantity. Only USD breaks are considered, so non-USD Mouser
+ * accounts don't silently mix currencies. Returns null when no USD price exists.
+ */
+export function unitCostFromOffer(offer: DistributorOffer): number | null {
+  const usd = offer.priceBreaks.filter(
+    (b) => (b.currency || "USD").toUpperCase() === "USD" && b.unitPrice > 0,
+  );
+  if (usd.length === 0) return null;
+  return usd.reduce((min, b) => (b.quantity < min.quantity ? b : min), usd[0]).unitPrice;
+}

@@ -96,7 +96,9 @@ export default function Home() {
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [fabOpen, setFabOpen] = useState(false);
-  const [modal, setModal] = useState<"part" | "location" | "import" | "enrich" | null>(null);
+  const [modal, setModal] = useState<
+    "part" | "location" | "import" | "enrich" | "refresh" | null
+  >(null);
   const [editing, setEditing] = useState<CatalogRow | null>(null);
 
   useEffect(() => {
@@ -233,6 +235,10 @@ export default function Home() {
           setModal("enrich");
           setFabOpen(false);
         }}
+        onRefreshCosts={() => {
+          setModal("refresh");
+          setFabOpen(false);
+        }}
       />
 
       {modal === "part" && (
@@ -275,7 +281,28 @@ export default function Home() {
         />
       )}
       {modal === "enrich" && (
-        <EnrichModal
+        <SyncModal
+          title="Enrich values from DigiKey/Mouser"
+          endpoint="/api/parts/enrich"
+          blurb={(n) =>
+            `${n} part${n === 1 ? "" : "s"} missing a value. Each is looked up on DigiKey/Mouser (throttled) to fill the value, plus blank category/size.`
+          }
+          startLabel="Start enrichment"
+          onClose={() => setModal(null)}
+          onDone={() => {
+            setModal(null);
+            refresh();
+          }}
+        />
+      )}
+      {modal === "refresh" && (
+        <SyncModal
+          title="Refresh DigiKey/Mouser costs (USD)"
+          endpoint="/api/parts/refresh-costs"
+          blurb={(n) =>
+            `${n} DigiKey/Mouser part${n === 1 ? "" : "s"} will have their unit cost refreshed from current USD pricing (throttled). LCSC and unidentified parts are left unchanged.`
+          }
+          startLabel="Refresh costs"
           onClose={() => setModal(null)}
           onDone={() => {
             setModal(null);
@@ -538,6 +565,7 @@ function Fab({
   onAddLocation,
   onImport,
   onEnrich,
+  onRefreshCosts,
 }: {
   open: boolean;
   onToggle: () => void;
@@ -545,6 +573,7 @@ function Fab({
   onAddLocation: () => void;
   onImport: () => void;
   onEnrich: () => void;
+  onRefreshCosts: () => void;
 }) {
   const action = "flex items-center gap-2";
   const bubble = "grid h-12 w-12 place-items-center rounded-full text-white shadow-lg";
@@ -557,6 +586,10 @@ function Fab({
           open ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-3 opacity-0"
         }`}
       >
+        <button className={action} onClick={onRefreshCosts}>
+          <span className={label}>Refresh costs ($)</span>
+          <span className={`${bubble} bg-teal-600`}>💲</span>
+        </button>
         <button className={action} onClick={onEnrich}>
           <span className={label}>Enrich values</span>
           <span className={`${bubble} bg-amber-600`}>✨</span>
@@ -850,19 +883,34 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
   );
 }
 
-interface EnrichStatus {
+interface SyncStatus {
   configured: boolean;
-  enrichable: number;
+  pending: number;
 }
 
-interface EnrichBatch {
+interface SyncBatch {
   processed: number;
   updated: number;
   nextAfterId: number | null;
 }
 
-function EnrichModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [status, setStatus] = useState<EnrichStatus | null>(null);
+/** Drives a resumable distributor batch job (enrich values / refresh costs) with progress. */
+function SyncModal({
+  title,
+  endpoint,
+  blurb,
+  startLabel,
+  onClose,
+  onDone,
+}: {
+  title: string;
+  endpoint: string;
+  blurb: (pending: number) => string;
+  startLabel: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [status, setStatus] = useState<SyncStatus | null>(null);
   const [running, setRunning] = useState(false);
   const [swept, setSwept] = useState(0);
   const [updated, setUpdated] = useState(0);
@@ -873,7 +921,7 @@ function EnrichModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
     let active = true;
     void (async () => {
       try {
-        const s = await jget<EnrichStatus>("/api/parts/enrich");
+        const s = await jget<SyncStatus>(endpoint);
         if (active) setStatus(s);
       } catch (e) {
         if (active && e instanceof Error && e.message !== "locked") setMsg(e.message);
@@ -882,7 +930,7 @@ function EnrichModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
     return () => {
       active = false;
     };
-  }, []);
+  }, [endpoint]);
 
   async function run() {
     setRunning(true);
@@ -893,7 +941,7 @@ function EnrichModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
     let updatedTotal = 0;
     try {
       for (;;) {
-        const res = await jpost<EnrichBatch>("/api/parts/enrich", { limit: 25, afterId });
+        const res = await jpost<SyncBatch>(endpoint, { limit: 25, afterId });
         sweptTotal += res.processed;
         updatedTotal += res.updated;
         setSwept(sweptTotal);
@@ -904,14 +952,14 @@ function EnrichModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
       }
       setDone(true);
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Enrichment failed.");
+      setMsg(e instanceof Error ? e.message : "Operation failed.");
     } finally {
       setRunning(false);
     }
   }
 
   return (
-    <Modal title="Enrich values from DigiKey/Mouser" onClose={onClose}>
+    <Modal title={title} onClose={onClose}>
       <div className="space-y-3 text-sm">
         {status === null && !msg && <p className="text-black/50 dark:text-white/50">Loading…</p>}
         {status && !status.configured && (
@@ -923,17 +971,14 @@ function EnrichModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
         )}
         {status?.configured && !done && (
           <>
-            <p className="text-black/70 dark:text-white/70">
-              {status.enrichable} part{status.enrichable === 1 ? "" : "s"} missing a value. Each is
-              looked up on DigiKey/Mouser (throttled) to fill the value, plus blank category/size.
-            </p>
+            <p className="text-black/70 dark:text-white/70">{blurb(status.pending)}</p>
             {running && (
               <p className="text-black/60 dark:text-white/60">
                 Swept {swept}… updated {updated}.
               </p>
             )}
-            <button className={btn} onClick={run} disabled={running || status.enrichable === 0}>
-              {running ? "Enriching…" : "Start enrichment"}
+            <button className={btn} onClick={run} disabled={running || status.pending === 0}>
+              {running ? "Working…" : startLabel}
             </button>
           </>
         )}
