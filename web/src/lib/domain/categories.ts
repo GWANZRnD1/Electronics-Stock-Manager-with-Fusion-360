@@ -7,12 +7,22 @@
  * a dropdown selection matches every variant in the database.
  */
 
-/** Comparison key: case-insensitive, whitespace-collapsed, de-pluralized. */
+/**
+ * Comparison key: case-insensitive, whitespace-collapsed, reduced to the
+ * leading segment, then de-pluralized. The leading-segment step folds the
+ * verbose distributor names ("Connectors, Interconnects", "Crystals,
+ * Oscillators, Resonators", "RF and Wireless") into the short form a user
+ * types ("Connectors", "Crystals", "RF") by cutting at the first separator
+ * (comma, slash, "(", " and ", " & ").
+ */
 export function categoryKey(raw: string): string {
-  return raw
+  const head = raw
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ")
+    .split(/\s*(?:,|\/|\(| and | & )/)[0]
+    .trim();
+  return head
     .replace(/ies$/, "y") // batteries -> battery
     .replace(/([^s])s$/, "$1"); // resistors -> resistor (keeps "glass", "ICs" -> "ic")
 }

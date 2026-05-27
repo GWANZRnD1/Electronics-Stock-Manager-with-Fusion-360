@@ -34,11 +34,12 @@ const money = (n: number | null | undefined): string | null =>
 
 /**
  * Postgres expression that mirrors `categoryKey` in domain/categories: lower,
- * trim, collapse whitespace, de-pluralize. Keep the two in lockstep so a
- * canonical dropdown value matches every spelling variant stored in the table.
+ * trim, collapse whitespace, cut to the leading segment (at the first comma /
+ * slash / "(" / " and " / " & "), then de-pluralize. Keep the two in lockstep
+ * so a canonical dropdown value matches every variant stored in the table.
  */
 function categoryKeySql(col: PgColumn): SQL<string> {
-  return sql<string>`regexp_replace(regexp_replace(regexp_replace(lower(btrim(${col})), '\\s+', ' ', 'g'), 'ies$', 'y'), '([^s])s$', '\\1')`;
+  return sql<string>`regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(btrim(${col})), '\\s+', ' ', 'g'), '\\s*(,|/|\\(| and | & ).*$', ''), 'ies$', 'y'), '([^s])s$', '\\1')`;
 }
 
 export function listParts(limit = 200) {

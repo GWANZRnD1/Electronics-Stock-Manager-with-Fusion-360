@@ -23,6 +23,24 @@ describe("categoryKey", () => {
   it("collapses internal whitespace", () => {
     expect(categoryKey("Voltage   Regulators")).toBe("voltage regulator");
   });
+
+  it("folds verbose distributor names into the leading category", () => {
+    expect(categoryKey("Connectors, Interconnects")).toBe(categoryKey("Connectors"));
+    expect(categoryKey("Crystals, Oscillators, Resonators")).toBe(categoryKey("Crystals"));
+    expect(categoryKey("RF and Wireless")).toBe(categoryKey("RF"));
+  });
+
+  it("keeps a distinct leading segment separate", () => {
+    // "Capacitor Networks, Arrays" is its own thing, not plain "Capacitors".
+    expect(categoryKey("Capacitor Networks, Arrays")).toBe("capacitor network");
+    expect(categoryKey("Capacitor Networks, Arrays")).not.toBe(categoryKey("Capacitors"));
+  });
+
+  it("splits on slash, ampersand, and parentheses", () => {
+    expect(categoryKey("Diodes / Rectifiers")).toBe("diode");
+    expect(categoryKey("Resistors & Networks")).toBe("resistor");
+    expect(categoryKey("Integrated Circuits (ICs)")).toBe("integrated circuit");
+  });
 });
 
 describe("pickCategoryLabel", () => {
@@ -58,5 +76,14 @@ describe("bundleCategories", () => {
     expect(labels).toEqual(["Capacitor", "LED", "Resistor"]);
     expect(byKey.get(categoryKey("Resistors"))).toBe("Resistor");
     expect(byKey.get(categoryKey("led"))).toBe("LED");
+  });
+
+  it("bundles a verbose distributor variant under the short label", () => {
+    const { byKey, labels } = bundleCategories([
+      { label: "Connectors", count: 5 },
+      { label: "Connectors, Interconnects", count: 2 },
+    ]);
+    expect(labels).toEqual(["Connectors"]);
+    expect(byKey.get(categoryKey("Connectors, Interconnects"))).toBe("Connectors");
   });
 });
