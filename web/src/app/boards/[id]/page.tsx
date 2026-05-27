@@ -282,19 +282,42 @@ export default function BoardDetailPage() {
 
   async function digikeyBatch() {
     if (!report) return;
-    // Only DigiKey-group parts go into the batch (by MPN; DigiKey resolves them).
-    const items = report.shortages
-      .filter((s) => s.bucket === "digikey" && s.buyLinks)
-      .map((s) => ({ partNumber: s.partKey, quantity: s.shortage }));
-    if (items.length === 0) {
+    const dk = report.shortages.filter((s) => s.bucket === "digikey" && s.buyLinks);
+    if (dk.length === 0) {
       setBatchMsg("No DigiKey-group shortages to batch.");
       return;
     }
     setBatchMsg("Building DigiKey list…");
     try {
-      const r = await jpost<{ url: string }>("/api/buy/digikey-batch", { items });
-      window.open(r.url, "_blank", "noopener");
-      setBatchMsg(`Opened a DigiKey list (${items.length} part type(s)) in a new tab.`);
+      // Matched parts carry a real MPN as their key; unmatched jellybeans (no
+      // supplier) carry a descriptor — resolve those to a real in-stock DigiKey
+      // MPN first so they actually populate the list.
+      const matched = dk.filter((s) => s.supplier).map((s) => ({ partNumber: s.partKey, quantity: s.shortage }));
+      const jelly = dk.filter((s) => !s.supplier);
+      const resolvedItems: { partNumber: string; quantity: number }[] = [];
+      let unresolved = 0;
+      if (jelly.length > 0) {
+        setBatchMsg("Resolving jellybeans on DigiKey…");
+        const r = await jpost<{ resolved: { mpn: string | null; quantity: number }[] }>(
+          "/api/buy/resolve-jellybeans",
+          { items: jelly.map((s) => ({ descriptor: s.partKey, quantity: s.shortage })) },
+        );
+        for (const it of r.resolved) {
+          if (it.mpn) resolvedItems.push({ partNumber: it.mpn, quantity: it.quantity });
+          else unresolved += 1;
+        }
+      }
+      const items = [...matched, ...resolvedItems];
+      if (items.length === 0) {
+        setBatchMsg("Couldn't resolve any DigiKey parts to batch — use the per-part links.");
+        return;
+      }
+      const b = await jpost<{ url: string }>("/api/buy/digikey-batch", { items });
+      window.open(b.url, "_blank", "noopener");
+      setBatchMsg(
+        `Opened a DigiKey list (${items.length} part type(s))` +
+          (unresolved > 0 ? ` — ${unresolved} jellybean(s) couldn't be matched.` : "."),
+      );
     } catch (e) {
       setBatchMsg(
         `DigiKey batch unavailable (${e instanceof Error ? e.message : "error"}). Use per-part links below.`,

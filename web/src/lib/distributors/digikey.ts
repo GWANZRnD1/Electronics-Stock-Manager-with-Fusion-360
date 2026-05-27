@@ -4,6 +4,7 @@
  * is configured. Token is cached in-memory until shortly before it expires.
  */
 import { digikeySearchUrl } from "@/lib/domain/buyLinks";
+import type { PartCandidate } from "@/lib/domain/jellybeanQuery";
 
 import type { DistributorOffer } from "./types";
 
@@ -119,6 +120,54 @@ export async function digikeySearch(mpn: string): Promise<DistributorOffer | nul
     datasheetUrl: product.DatasheetUrl ?? null,
     mock: false,
   };
+}
+
+/** Lowest unit price across all variations/breaks (0 if none priced). */
+function minUnitPrice(product: DkProduct): number {
+  let min = 0;
+  for (const v of product.ProductVariations ?? []) {
+    for (const b of v.StandardPricing ?? []) {
+      const up = b.UnitPrice ?? 0;
+      if (up > 0 && (min === 0 || up < min)) min = up;
+    }
+  }
+  return min;
+}
+
+/**
+ * Keyword search returning multiple ranked-by-caller candidates (price + stock +
+ * package), used to resolve a generic jellybean descriptor to a real part. Empty
+ * when DigiKey isn't configured (no mock — the caller just skips resolution).
+ */
+export async function digikeySearchCandidates(
+  keywords: string,
+  limit = 10,
+): Promise<PartCandidate[]> {
+  if (!digikeyConfigured()) return [];
+
+  const token = await getToken();
+  const res = await fetch(`${base()}/products/v4/search/keyword`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "X-DIGIKEY-Client-Id": process.env.DIGIKEY_CLIENT_ID ?? "",
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({ Keywords: keywords, Limit: limit }),
+  });
+  if (!res.ok) throw new Error(`DigiKey search failed (${res.status})`);
+
+  const json = (await res.json()) as { Products?: DkProduct[] };
+  return (json.Products ?? [])
+    .map((p) => ({
+      mpn: p.ManufacturerProductNumber ?? "",
+      manufacturer: p.Manufacturer?.Name ?? "",
+      packageText: dkPackage(p.Parameters),
+      stock: p.QuantityAvailable ?? 0,
+      unitPrice: minUnitPrice(p),
+    }))
+    .filter((c) => c.mpn);
 }
 
 function mockOffer(mpn: string): DistributorOffer {
