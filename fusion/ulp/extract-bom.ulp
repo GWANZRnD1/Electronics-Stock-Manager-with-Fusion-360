@@ -1,0 +1,254 @@
+#usage "en: <b>Extract this design's electronic-component BOM</b> (grouped by part, "
+       "with quantity + designators per line). Run from the <b>Schematic</b> editor "
+       "(best — richest attributes) or the <b>Board</b> editor. Writes a <b>.json</b> "
+       "ready to POST to the Stock Manager (<i>/api/fusion/bom</i>) and a sibling "
+       "<b>.csv</b> you can paste straight into a board's BOM box in the app. "
+       "Read-only; it changes nothing in the design.\n"
+
+// ---------------------------------------------------------------------------
+// String helpers
+// ---------------------------------------------------------------------------
+
+// JSON-escape a string value (quotes, backslash, control chars).
+string jsonEscape(string s) {
+  string out = "";
+  int n = strlen(s);
+  for (int i = 0; i < n; i++) {
+    string c = strsub(s, i, 1);
+    if      (c == "\"") out += "\\\"";
+    else if (c == "\\") out += "\\\\";
+    else if (c == "\n") out += "\\n";
+    else if (c == "\r") out += "\\r";
+    else if (c == "\t") out += "\\t";
+    else out += c;
+  }
+  return out;
+}
+
+// Replace commas with spaces. The app's BOM paste box splits each line on ','
+// into "MPN, qty, value, package, designators", so any field we emit must not
+// contain a comma or it would spill into the next column.
+string noComma(string s) {
+  string out = "";
+  int n = strlen(s);
+  for (int i = 0; i < n; i++) {
+    string c = strsub(s, i, 1);
+    if (c == ",") out += " "; else out += c;
+  }
+  return out;
+}
+
+// Index of the last path separator ('/' or '\'), or -1 if none.
+int lastSep(string s) {
+  int a = strrchr(s, '/');
+  int b = strrchr(s, '\\');
+  return a > b ? a : b;
+}
+
+// File name without its directory or extension (used as the board name).
+string baseName(string path) {
+  string f = strsub(path, lastSep(path) + 1);
+  int dot = strrchr(f, '.');
+  if (dot > 0) f = strsub(f, 0, dot);
+  return f;
+}
+
+// Same path with its extension swapped (e.g. board-bom.json -> board-bom.csv).
+string swapExt(string name, string ext) {
+  int dot = strrchr(name, '.');
+  if (dot > lastSep(name)) return strsub(name, 0, dot) + ext;
+  return name + ext;
+}
+
+// ---------------------------------------------------------------------------
+// Grouped BOM accumulation
+//   Identical parts collapse into one line. The key is the MPN when present,
+//   otherwise value + package + deviceset (so a 10k 0603 resistor and a 10k
+//   0805 resistor stay separate, but every 10k 0603 merges).
+// ---------------------------------------------------------------------------
+
+string bomKey[];    // dedupe key
+string bomMpn[];    // manufacturer part number ("" if unknown)
+string bomValue[];  // part value
+string bomPkg[];    // package / footprint name
+string bomDes[];    // comma-joined designators (refdes), capped near the API limit
+int    bomQty[];    // quantity per board
+int    bomN = 0;    // number of distinct line items
+
+int    totalParts = 0;    // populated components counted
+int    skippedNoPkg = 0;  // parts with no physical package (supply/GND symbols)
+int    skippedFrame = 0;  // drawing title-block frames (not real components)
+
+// Title-block frames slip past the package check (they carry a placeholder
+// package like CREATIVE_COMMONS), so drop them explicitly. Matches the standard
+// frame devicesets (FRAME-*) and the placeholder package name.
+int isFrame(string dsName, string pkgName) {
+  return (strsub(strupr(dsName), 0, 5) == "FRAME" ||
+          strupr(pkgName) == "CREATIVE_COMMONS");
+}
+
+void addPart(string mpn, string value, string pkg, string ds, string refdes) {
+  totalParts++;
+
+  string key;
+  if (mpn != "") key = "M\t" + mpn;
+  else           key = "V\t" + value + "\t" + pkg + "\t" + ds;
+
+  int idx = -1;
+  for (int i = 0; i < bomN; i++) {
+    if (bomKey[i] == key) { idx = i; break; }
+  }
+
+  if (idx < 0) {
+    bomKey[bomN]   = key;
+    bomMpn[bomN]   = mpn;
+    bomValue[bomN] = value;
+    bomPkg[bomN]   = pkg;
+    bomDes[bomN]   = refdes;
+    bomQty[bomN]   = 1;
+    bomN++;
+  } else {
+    bomQty[idx]++;
+    // Keep the joined designators under the app's 256-char field cap; the
+    // quantity stays exact even when the refdes list is truncated.
+    if (strlen(bomDes[idx]) < 240) bomDes[idx] += "," + refdes;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MPN extraction. The attribute that holds the manufacturer part number varies
+// by library, so match a list of common names (case-insensitive).
+// ---------------------------------------------------------------------------
+
+int isMpnAttr(string nameUpper) {
+  return (nameUpper == "MPN" ||
+          nameUpper == "MANUFACTURER_PART_NUMBER" ||
+          nameUpper == "MANUFACTURERPARTNUMBER" ||
+          nameUpper == "MFR_PN" ||
+          nameUpper == "MF_PARTNUMBER" ||
+          nameUpper == "PART_NUMBER");
+}
+
+string mpnOfPart(UL_PART P) {
+  string mpn = "";
+  P.attributes(A) {
+    if (A.value != "" && isMpnAttr(strupr(A.name))) mpn = A.value;
+  }
+  return mpn;
+}
+
+string mpnOfElement(UL_ELEMENT E) {
+  string mpn = "";
+  E.attributes(A) {
+    if (A.value != "" && isMpnAttr(strupr(A.name))) mpn = A.value;
+  }
+  return mpn;
+}
+
+// ---------------------------------------------------------------------------
+// Read the active design (schematic preferred, board as a fallback)
+// ---------------------------------------------------------------------------
+
+string boardName = "design";
+
+if (schematic) {
+  schematic(S) {
+    boardName = baseName(S.name);
+    S.parts(P) {
+      if (P.populate) {                          // skip "do not populate" parts
+        // Guard the object itself: supply/frame symbols have no package, and
+        // their P.device.package is an *uninitialized* object — reading .name
+        // on it throws "Reference to uninitialized object variable".
+        if (!P.device.package)
+          skippedNoPkg++;
+        else if (isFrame(P.deviceset.name, P.device.package.name))
+          skippedFrame++;
+        else
+          addPart(mpnOfPart(P), P.value, P.device.package.name, P.deviceset.name, P.name);
+      }
+    }
+  }
+}
+else if (board) {
+  board(B) {
+    boardName = baseName(B.name);
+    B.elements(E) {
+      if (E.populate) {                          // skip "do not populate" parts
+        if (!E.package)                          // physical elements normally have one
+          skippedNoPkg++;
+        else if (isFrame(E.name, E.package.name))
+          skippedFrame++;
+        else
+          addPart(mpnOfElement(E), E.value, E.package.name, "", E.name);
+      }
+    }
+  }
+}
+else {
+  dlgMessageBox("Open this from a Schematic or Board editor — it reads the active design.");
+  exit(0);
+}
+
+if (bomN == 0) {
+  dlgMessageBox("No populated components with a package were found in this design.");
+  exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Write the outputs
+// ---------------------------------------------------------------------------
+
+string jsonFile = dlgFileSave("Save BOM (JSON for the Stock Manager API)",
+                              boardName + "-bom.json",
+                              "JSON files (*.json);;All files (*)");
+if (jsonFile == "") exit(0);
+string csvFile = swapExt(jsonFile, ".csv");
+
+int linesWithMpn = 0;
+for (int i = 0; i < bomN; i++) if (bomMpn[i] != "") linesWithMpn++;
+
+// JSON — matches the app's /api/fusion/bom payload (fusionImportSchema) exactly.
+output(jsonFile, "wt") {
+  printf("{\n");
+  printf("  \"board\": { \"name\": \"%s\" },\n", jsonEscape(boardName));
+  printf("  \"lines\": [\n");
+  for (int i = 0; i < bomN; i++) {
+    printf("    {");
+    if (bomMpn[i] != "") printf("\"partMpn\": \"%s\", ", jsonEscape(bomMpn[i]));
+    else                 printf("\"partMpn\": null, ");
+    printf("\"value\": \"%s\", \"package\": \"%s\", \"designators\": \"%s\", \"qtyPerBoard\": %d}",
+           jsonEscape(bomValue[i]), jsonEscape(bomPkg[i]), jsonEscape(bomDes[i]), bomQty[i]);
+    if (i < bomN - 1) printf(",");
+    printf("\n");
+  }
+  printf("  ]\n}\n");
+}
+
+// CSV — one line per part: "MPN, qty, value, package, designators".
+// Designators are space-joined (not comma) so the paste box keeps them in a
+// single field. No header row: the paste parser treats every line as data.
+output(csvFile, "wt") {
+  for (int i = 0; i < bomN; i++) {
+    printf("%s, %d, %s, %s, %s\n",
+           bomMpn[i], bomQty[i],
+           noComma(bomValue[i]), noComma(bomPkg[i]), noComma(bomDes[i]));
+  }
+}
+
+string msg, tmp;
+sprintf(msg, "BOM extracted from \"%s\".\n\n", boardName);
+sprintf(tmp, "Components (populated): %d\nLine items (grouped): %d\nWith MPN: %d\n",
+        totalParts, bomN, linesWithMpn);
+msg += tmp;
+if (skippedNoPkg > 0) {
+  sprintf(tmp, "Skipped (no package — supply/GND symbols): %d\n", skippedNoPkg);
+  msg += tmp;
+}
+if (skippedFrame > 0) {
+  sprintf(tmp, "Skipped (drawing frames): %d\n", skippedFrame);
+  msg += tmp;
+}
+msg += "\nSaved:\n  " + jsonFile + "\n  " + csvFile +
+       "\n\nNext: POST the JSON to the app's /api/fusion/bom endpoint, or open a "
+       "board in the app and paste the CSV into its BOM box.";
+dlgMessageBox(msg);

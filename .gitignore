@@ -28,6 +28,13 @@ fusion/addin/lib/
 # Fusion sync script local config (contains the API token)
 fusion/addin/**/config.json
 
+# Fusion ULP outputs — generated data dumps / scripts, not source
+fusion/ulp/*.scr
+fusion/ulp/library.json
+fusion/ulp/library.csv
+fusion/ulp/*-bom.json
+fusion/ulp/*-bom.csv
+
 # OS / editor
 .DS_Store
 Thumbs.db
