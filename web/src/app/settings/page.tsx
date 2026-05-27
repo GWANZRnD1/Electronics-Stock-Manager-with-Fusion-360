@@ -129,6 +129,7 @@ interface SyncBatch {
   updated: number;
   live: number;
   errors: number;
+  rateLimited: boolean;
   nextAfterId: number | null;
 }
 
@@ -142,6 +143,7 @@ function SyncPanel() {
   const [updated, setUpdated] = useState(0);
   const [live, setLive] = useState(0);
   const [errors, setErrors] = useState(0);
+  const [rateLimited, setRateLimited] = useState(false);
   const [done, setDone] = useState(false);
   const [msg, setMsg] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
@@ -169,6 +171,7 @@ function SyncPanel() {
     setUpdated(0);
     setLive(0);
     setErrors(0);
+    setRateLimited(false);
     let afterId = 0;
     let sweptTotal = 0;
     let updatedTotal = 0;
@@ -190,6 +193,7 @@ function SyncPanel() {
         setUpdated(updatedTotal);
         setLive(liveTotal);
         setErrors(errorsTotal);
+        if (res.rateLimited) setRateLimited(true);
         if (res.nextAfterId === null) break;
         afterId = res.nextAfterId;
         await new Promise((r) => setTimeout(r, 300)); // gentle pause between batches
@@ -263,7 +267,14 @@ function SyncPanel() {
               </span>
             )}
           </div>
-          {done && !running && live === 0 && (
+          {done && !running && rateLimited && (
+            <p className="mt-2 rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+              Stopped early: a distributor hit its <strong>daily rate limit (HTTP 429)</strong>. Your keys
+              are fine — the quota is spent. Try again later (DigiKey resets daily); already-filled parts
+              are skipped, so re-running picks up where this left off.
+            </p>
+          )}
+          {done && !running && !rateLimited && live === 0 && (
             <p className="mt-2 rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
               No live distributor data came back for any part — so only values derivable from existing
               descriptions could be filled. Check that the server has valid DigiKey/Mouser keys and{" "}

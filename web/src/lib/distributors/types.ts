@@ -26,4 +26,5 @@ export interface DistributorOffer {
 export interface LookupResult {
   mpn: string;
   offers: DistributorOffer[];
+  errors?: { distributor: DistributorId; message: string }[]; // per-distributor failures (e.g. 429)
 }

@@ -628,9 +628,13 @@ export interface SyncBatchResult {
   processed: number;
   updated: number;
   live: number; // parts for which a live (non-mock) distributor offer was returned
-  errors: number; // parts whose lookup threw
+  errors: number; // parts whose distributor lookup failed
+  rateLimited: boolean; // a distributor returned 429 — sweep stopped early
   nextAfterId: number | null; // pass back as `afterId`; null = sweep complete
 }
+
+// A distributor lookup error that means "back off", not "no match".
+const RATE_LIMIT_RE = /\b429\b|too many requests|rate ?limit/i;
 
 /**
  * One resumable batch of distributor sync, combining two opt-in operations behind
@@ -661,7 +665,7 @@ export async function syncFromDistributors(
   const delayMs = opts.delayMs ?? 300;
   const afterId = opts.afterId ?? 0;
   if (!fillValues && !refreshCosts) {
-    return { processed: 0, updated: 0, live: 0, errors: 0, nextAfterId: null };
+    return { processed: 0, updated: 0, live: 0, errors: 0, rateLimited: false, nextAfterId: null };
   }
 
   const clauses = [];
@@ -688,8 +692,10 @@ export async function syncFromDistributors(
     .limit(limit);
 
   let updated = 0;
+  let processed = 0;
   let liveCount = 0;
   let errorCount = 0;
+  let rateLimited = false;
   for (let i = 0; i < targets.length; i++) {
     const t = targets[i];
     const supplier = t.supplier.toLowerCase();
@@ -698,15 +704,26 @@ export async function syncFromDistributors(
     // SPN is the precise lookup key for DigiKey/Mouser; for LCSC it's the C-number.
     const key = (isApi || isLcsc) && t.spn ? t.spn : t.mpn || t.spn;
     if (!key) continue;
+    processed++;
 
-    let offers;
+    let lookup;
     try {
-      ({ offers } = await lookupPart(key));
+      lookup = await lookupPart(key);
     } catch (e) {
       errorCount++;
       console.warn(`[sync] part ${t.id} (${key}): lookup failed —`, e instanceof Error ? e.message : e);
       continue; // transient error — a later sweep retries
     }
+    const { offers, errors: lookupErrors } = lookup;
+
+    // A 429 means the daily quota is spent — stop now rather than burn the rest
+    // of the sweep on guaranteed failures, and report it so the UI is honest.
+    if (lookupErrors?.some((e) => RATE_LIMIT_RE.test(e.message))) {
+      rateLimited = true;
+      console.warn(`[sync] part ${t.id} (${key}): distributor rate limit (429) — stopping sweep`);
+      break;
+    }
+    if (lookupErrors?.length) errorCount++;
 
     const live = offers.filter((o) => !o.mock);
     if (live.length > 0) liveCount++;
@@ -781,10 +798,13 @@ export async function syncFromDistributors(
   }
 
   return {
-    processed: targets.length,
+    processed,
     updated,
     live: liveCount,
     errors: errorCount,
-    nextAfterId: targets.at(-1)?.id ?? null,
+    rateLimited,
+    // Stop the client loop on a rate limit; the next manual run re-sweeps the
+    // still-unfilled parts (eligibility is by missing field, so it's idempotent).
+    nextAfterId: rateLimited ? null : (targets.at(-1)?.id ?? null),
   };
 }
