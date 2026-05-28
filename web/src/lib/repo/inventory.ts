@@ -185,6 +185,47 @@ export async function nextFreeAruco(capacity: number): Promise<number | null> {
   return null;
 }
 
+/**
+ * Bulk-assign marker ids to the given locations that don't have one yet, filling
+ * the lowest free ids first (in display/name order so top-to-bottom gets ascending
+ * ids). Existing assignments are left untouched. Runs in one transaction and stops
+ * if the dictionary fills up. Returns per-outcome counts.
+ */
+export async function assignArucoCodes(
+  ids: number[],
+  capacity: number,
+): Promise<{ assigned: number; alreadyHad: number; unassigned: number; full: boolean }> {
+  const wanted = new Set(ids);
+  if (wanted.size === 0) return { assigned: 0, alreadyHad: 0, unassigned: 0, full: false };
+  return getDb().transaction(async (tx) => {
+    const all = await tx
+      .select({ id: locations.id, name: locations.name, aruco: locations.aruco })
+      .from(locations);
+    const used = new Set<number>(all.flatMap((l) => (l.aruco === null ? [] : [l.aruco])));
+    const targets = all
+      .filter((l) => wanted.has(l.id))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const alreadyHad = targets.filter((l) => l.aruco !== null).length;
+    const toAssign = targets.filter((l) => l.aruco === null);
+
+    let next = 0;
+    let assigned = 0;
+    let full = false;
+    for (const t of toAssign) {
+      while (next < capacity && used.has(next)) next++;
+      if (next >= capacity) {
+        full = true;
+        break;
+      }
+      await tx.update(locations).set({ aruco: next }).where(eq(locations.id, t.id));
+      used.add(next);
+      assigned++;
+      next++;
+    }
+    return { assigned, alreadyHad, unassigned: toAssign.length - assigned, full };
+  });
+}
+
 export function listStock(limit = 500) {
   return getDb()
     .select({

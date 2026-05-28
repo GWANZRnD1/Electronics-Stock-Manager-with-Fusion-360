@@ -65,6 +65,10 @@ export const updateLocationSchema = z
   })
   .refine((d) => Object.keys(d).length > 0, { message: "no fields to update" });
 
+export const assignArucoSchema = z.object({
+  ids: z.array(z.number().int().positive()).min(1).max(5000),
+});
+
 export const arucoConfigSchema = z.object({
   // Keep in lockstep with ARUCO_DICT_NAMES in lib/aruco/marker.ts.
   dict: z.enum(["4X4_50", "5X5_100", "6X6_250"]),

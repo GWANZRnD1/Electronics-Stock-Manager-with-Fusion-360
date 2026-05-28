@@ -35,18 +35,33 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 }
 
-/** Open a print window with the marker at its configured physical size. */
-function printMarker(loc: Location, cfg: ArucoConfig) {
-  if (loc.aruco === null) return;
-  const svg = arucoSvg(cfg.dict, loc.aruco, { sizeMm: cfg.sizeMm, quiet: 2 });
+/**
+ * Open a print window that tiles every given marker onto A4 pages (many per sheet,
+ * to save paper). Works for one marker or a whole selection; locations without a
+ * marker id are skipped. Each marker is sized in mm and kept whole across pages.
+ */
+function printMarkers(locs: Location[], cfg: ArucoConfig) {
+  const withCodes = locs.filter((l): l is Location & { aruco: number } => l.aruco !== null);
+  if (withCodes.length === 0) return;
+  const cells = withCodes
+    .map(
+      (l) =>
+        `<figure><div class="m">${arucoSvg(cfg.dict, l.aruco, { sizeMm: cfg.sizeMm, quiet: 2 })}</div>` +
+        `<figcaption>${escapeHtml(l.name)} · ${cfg.dict} #${l.aruco}</figcaption></figure>`,
+    )
+    .join("");
   const w = window.open("", "_blank");
   if (!w) return;
   w.document.write(
-    `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(loc.name)}</title>` +
-      `<style>body{font-family:system-ui,sans-serif;text-align:center;margin:24px}` +
-      `figcaption{margin-top:10px;font-size:14px;color:#333}</style></head><body>` +
-      `<figure style="margin:0">${svg}` +
-      `<figcaption>${escapeHtml(loc.name)} · ${cfg.dict} #${loc.aruco}</figcaption></figure>` +
+    `<!doctype html><html><head><meta charset="utf-8"><title>ArUco markers (${withCodes.length})</title>` +
+      `<style>` +
+      `@page{size:A4;margin:10mm}` +
+      `body{font-family:system-ui,sans-serif;margin:0}` +
+      `.grid{display:flex;flex-wrap:wrap;gap:6mm;align-content:flex-start}` +
+      `figure{margin:0;break-inside:avoid;text-align:center}` +
+      `.m{line-height:0}` +
+      `figcaption{margin-top:1.5mm;font-size:9pt;color:#333;max-width:${cfg.sizeMm + 10}mm;word-break:break-word}` +
+      `</style></head><body><div class="grid">${cells}</div>` +
       `<script>window.onload=function(){window.print()}</script></body></html>`,
   );
   w.document.close();
@@ -131,8 +146,10 @@ export default function LocationsPage() {
   // null = follow the suggested next-free id; a string = the user's manual override.
   const [arucoOverride, setArucoOverride] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   const capacity = cfg ? dictCapacity(cfg.dict) : 0;
   const suggested = useMemo(() => nextFreeId(locations, capacity), [locations, capacity]);
@@ -172,6 +189,7 @@ export default function LocationsPage() {
   async function run(fn: () => Promise<unknown>) {
     setBusy(true);
     setError("");
+    setNotice("");
     try {
       await fn();
       setEditingId(null);
@@ -181,6 +199,41 @@ export default function LocationsPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function toggleOne(id: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectUnmarked() {
+    setSelected(new Set(locations.filter((l) => l.aruco === null).map((l) => l.id)));
+  }
+
+  async function assignSelected() {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    await run(async () => {
+      const r = await jpost<{ assigned: number; alreadyHad: number; unassigned: number; full: boolean }>(
+        "/api/locations/assign-aruco",
+        { ids },
+      );
+      setSelected(new Set());
+      setNotice(
+        `Assigned ${r.assigned} code${r.assigned === 1 ? "" : "s"}` +
+          (r.alreadyHad ? `, ${r.alreadyHad} already had one` : "") +
+          (r.full ? ` — dictionary full, ${r.unassigned} left unassigned` : "") +
+          ".",
+      );
+    });
+  }
+
+  function printSelected() {
+    if (cfg) printMarkers(locations.filter((l) => selected.has(l.id)), cfg);
   }
 
   async function create(e: React.FormEvent) {
@@ -204,6 +257,11 @@ export default function LocationsPage() {
     (!Number.isInteger(Number(arucoValue)) || Number(arucoValue) < 0 || Number(arucoValue) >= capacity);
   const full = suggested === null && arucoValue.trim() === "";
 
+  const allSelected = locations.length > 0 && locations.every((l) => selected.has(l.id));
+  const selectedWithCodes = locations.filter((l) => selected.has(l.id) && l.aruco !== null).length;
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(locations.map((l) => l.id)));
+
   return (
     <>
       <Nav />
@@ -223,6 +281,11 @@ export default function LocationsPage() {
         {error && (
           <p className="mb-4 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
             {error}
+          </p>
+        )}
+        {notice && (
+          <p className="mb-4 rounded-md bg-green-500/10 px-3 py-2 text-sm text-green-700 dark:text-green-400">
+            {notice}
           </p>
         )}
 
@@ -262,6 +325,37 @@ export default function LocationsPage() {
           a marker. {full && <span className="text-amber-600 dark:text-amber-400">Dictionary is full.</span>}
         </p>
 
+        {locations.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-black/10 px-3 py-2 text-sm dark:border-white/15">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" className="size-4" checked={allSelected} onChange={toggleAll} />
+              <span>Select all</span>
+            </label>
+            <button className={btnSm} onClick={selectUnmarked} disabled={busy}>
+              Select unmarked
+            </button>
+            <span className="text-black/50 dark:text-white/50">{selected.size} selected</span>
+            <span className="ml-auto flex flex-wrap gap-2">
+              <button className={btnSm} onClick={assignSelected} disabled={busy || selected.size === 0}>
+                Assign ArUco codes
+              </button>
+              <button
+                className={btnSm}
+                onClick={printSelected}
+                disabled={busy || selectedWithCodes === 0}
+                title="Tile the selected markers onto A4 pages"
+              >
+                Print selected ({selectedWithCodes})
+              </button>
+              {selected.size > 0 && (
+                <button className={btnSm} onClick={() => setSelected(new Set())} disabled={busy}>
+                  Clear
+                </button>
+              )}
+            </span>
+          </div>
+        )}
+
         {locations.length === 0 ? (
           <p className="text-sm text-black/60 dark:text-white/60">No locations yet.</p>
         ) : (
@@ -271,6 +365,13 @@ export default function LocationsPage() {
                 key={loc.id}
                 className="flex flex-wrap items-center gap-4 rounded-xl border border-black/10 p-4 dark:border-white/15"
               >
+                <input
+                  type="checkbox"
+                  className="size-4 shrink-0"
+                  checked={selected.has(loc.id)}
+                  onChange={() => toggleOne(loc.id)}
+                  aria-label={`Select ${loc.name}`}
+                />
                 {cfg && loc.aruco !== null ? (
                   <ArucoMarker dict={cfg.dict} id={loc.aruco} size={72} title={`${loc.name} marker`} />
                 ) : (
@@ -302,7 +403,7 @@ export default function LocationsPage() {
                       <button
                         className={btnSm}
                         disabled={busy || loc.aruco === null}
-                        onClick={() => cfg && printMarker(loc, cfg)}
+                        onClick={() => cfg && printMarkers([loc], cfg)}
                       >
                         Print
                       </button>
