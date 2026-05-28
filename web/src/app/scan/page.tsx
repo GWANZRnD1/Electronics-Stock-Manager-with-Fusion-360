@@ -4,12 +4,15 @@ import { useEffect, useRef, useState } from "react";
 import type { ReaderOptions } from "zxing-wasm/reader";
 
 import { Nav } from "@/components/Nav";
+import { detectArucoId } from "@/lib/aruco/detect";
+import { type ArucoDictName } from "@/lib/aruco/marker";
 import { jget, jpost } from "@/lib/client";
 import { EOT, GS, RS, decodeScannedBytes, parseLabel } from "@/lib/domain/barcode";
 
 interface Location {
   id: number;
   name: string;
+  aruco: number | null;
 }
 
 interface Offer {
@@ -70,6 +73,45 @@ function looksLikeMpn(s: string): boolean {
 const inputClass =
   "w-full rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20";
 
+/**
+ * Mobile-friendly modal: a bottom sheet on phones, a centred dialog on wider
+ * screens. Scrolls when the content is taller than the viewport. Backdrop click
+ * and ✕ both dismiss.
+ */
+function Sheet({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-t-2xl border border-black/10 bg-[var(--background)] p-5 sm:rounded-2xl dark:border-white/15"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="font-medium">{title}</h2>
+          <button
+            className="text-black/50 hover:text-black dark:text-white/50 dark:hover:text-white"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export default function ScanPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -103,6 +145,23 @@ export default function ScanPage() {
   const [category, setCategory] = useState("");
   const [pkg, setPkg] = useState("");
   const [looking, setLooking] = useState(false);
+  const [receiveOpen, setReceiveOpen] = useState(false); // review/receive modal (opens on detect)
+  const [locPickerOpen, setLocPickerOpen] = useState(false); // reassign-location modal
+  const [scanMode, setScanMode] = useState<"component" | "location">("component");
+
+  // Refs the running scan loop reads (it closes over the render where it started).
+  const modeRef = useRef<"component" | "location">("component");
+  const locationsRef = useRef<Location[]>([]);
+  const arucoDictRef = useRef<ArucoDictName>("6X6_250");
+
+  function setMode(m: "component" | "location") {
+    modeRef.current = m;
+    setScanMode(m);
+  }
+
+  useEffect(() => {
+    locationsRef.current = locations;
+  }, [locations]);
 
   useEffect(() => {
     let active = true;
@@ -111,8 +170,14 @@ export default function ScanPage() {
     const video = videoRef.current;
     void (async () => {
       try {
-        const locs = await jget<Location[]>("/api/locations");
-        if (active) setLocations(locs);
+        const [locs, cfg] = await Promise.all([
+          jget<Location[]>("/api/locations"),
+          jget<{ dict: ArucoDictName; sizeMm: number }>("/api/settings/aruco"),
+        ]);
+        if (active) {
+          setLocations(locs);
+          arucoDictRef.current = cfg.dict;
+        }
       } catch (e) {
         if (active && e instanceof Error && e.message !== "locked") setError(e.message);
       }
@@ -189,6 +254,7 @@ export default function ScanPage() {
           (label.quantity != null ? ` · qty ${label.quantity}` : ""),
       );
       setMsg("");
+      setReceiveOpen(true); // surface the review/receive modal for the detected part
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not parse that code.");
     }
@@ -198,11 +264,10 @@ export default function ScanPage() {
     return (canvasRef.current ??= document.createElement("canvas"));
   }
 
-  /** Decode the current video frame with the WASM reader. Returns text or null. */
-  async function decodeFrame(): Promise<string | null> {
-    const reader = readerRef.current;
+  /** Draw the current video frame to the scratch canvas and return its pixels. */
+  function grabFrame(): ImageData | null {
     const video = videoRef.current;
-    if (!reader || !video) return null;
+    if (!video) return null;
     const w = video.videoWidth;
     const h = video.videoHeight;
     if (!w || !h) return null;
@@ -212,24 +277,68 @@ export default function ScanPage() {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, w, h);
-    const results = await reader.readBarcodes(ctx.getImageData(0, 0, w, h), READER_OPTIONS);
+    return ctx.getImageData(0, 0, w, h);
+  }
+
+  /** Decode the current video frame with the WASM reader. Returns text or null. */
+  async function decodeFrame(): Promise<string | null> {
+    const reader = readerRef.current;
+    const image = grabFrame();
+    if (!reader || !image) return null;
+    const results = await reader.readBarcodes(image, READER_OPTIONS);
     const hit = results.find((r) => r.bytes?.length || r.text);
     return hit ? decodeScannedBytes(hit.bytes, hit.text) : null;
+  }
+
+  /**
+   * Location mode: read an ArUco marker, map it to a location, set it as the
+   * current receive location, then drop back to scanning component barcodes.
+   */
+  async function detectLocationInFrame(): Promise<void> {
+    const image = grabFrame();
+    if (!image) return;
+    const id = await detectArucoId(image, arucoDictRef.current);
+    if (id === null) return;
+    const loc = locationsRef.current.find((l) => l.aruco === id);
+    if (!loc) {
+      setHint(`Saw marker #${id}, but no location uses it — assign it on the Locations tab.`);
+      return;
+    }
+    setLocationId(loc.id);
+    setMode("component"); // back to scanning parts into the newly-set location
+    setError("");
+    setHint("");
+    setMsg(`Location set to “${loc.name}” (marker #${id}). Now scan parts to receive here.`);
   }
 
   async function scanLoop() {
     if (!scanningRef.current) return;
     try {
-      const text = await decodeFrame();
-      if (text) {
-        applyRaw(text);
-        stop();
-        return;
+      if (modeRef.current === "location") {
+        await detectLocationInFrame();
+      } else {
+        const text = await decodeFrame();
+        if (text) {
+          applyRaw(text);
+          stop();
+          return;
+        }
       }
     } catch {
-      /* transient decode failure (frame not ready, wasm warming up) — keep going */
+      /* transient failure (frame not ready, wasm warming up) — keep going */
     }
     if (scanningRef.current) loopRef.current = setTimeout(() => void scanLoop(), 180);
+  }
+
+  /** Start (or switch to) scanning for a location ArUco marker. */
+  async function beginLocationScan() {
+    setLocPickerOpen(false);
+    setReceiveOpen(false); // need the camera visible
+    setMsg("");
+    setError("");
+    setMode("location");
+    if (!scanningRef.current) await start();
+    else setHint("Point the camera at a location’s ArUco marker.");
   }
 
   /** Wire torch/zoom/focus from the live track's capabilities. */
@@ -293,11 +402,18 @@ export default function ScanPage() {
   }
 
   function startHintTimer() {
-    setHint("Scanning… fill the box with the code and hold steady.");
+    const loc = modeRef.current === "location";
+    setHint(
+      loc
+        ? "Point the camera at a location’s ArUco marker and hold steady."
+        : "Scanning… fill the box with the code and hold steady.",
+    );
     hintTimerRef.current = setTimeout(() => {
       if (scanningRef.current) {
         setHint(
-          "Still scanning — zoom in, move closer, steady your hand, turn the light on, or tap Capture for a sharp photo.",
+          modeRef.current === "location"
+            ? "Still looking for a location marker — fill the box with it, hold steady, and add light if it’s dim."
+            : "Still scanning — zoom in, move closer, steady your hand, turn the light on, or tap Capture for a sharp photo.",
         );
       }
     }, 6000);
@@ -417,6 +533,7 @@ export default function ScanPage() {
     setZoom(0);
     setHint("");
     setScanning(false);
+    setMode("component"); // next Start camera resumes component scanning
   }
 
   async function receive(e: React.FormEvent) {
@@ -446,10 +563,13 @@ export default function ScanPage() {
       setName("");
       setCategory("");
       setPkg("");
+      setReceiveOpen(false); // done — back to the camera view (location stays set)
     } catch (e) {
       setError(e instanceof Error ? e.message : "Receive failed.");
     }
   }
+
+  const currentLoc = locations.find((l) => l.id === locationId) ?? null;
 
   return (
     <>
@@ -457,8 +577,9 @@ export default function ScanPage() {
       <main className="mx-auto w-full max-w-lg flex-1 p-4 sm:p-6">
         <h1 className="mb-1 text-2xl font-semibold tracking-tight">Scan &amp; receive</h1>
         <p className="mb-4 text-sm text-black/60 dark:text-white/60">
-          Point the camera at a reel/bag barcode (DigiKey/Mouser DataMatrix or LCSC QR), then
-          choose a location and receive it.
+          Set the location you&rsquo;re stocking into, then scan each part&rsquo;s barcode
+          (DigiKey/Mouser DataMatrix or LCSC QR). A review popup lets you fine-tune the details and
+          confirm before it&rsquo;s received.
         </p>
 
         {error && (
@@ -476,7 +597,16 @@ export default function ScanPage() {
           <video ref={videoRef} className="aspect-square w-full object-cover" muted playsInline />
           {scanning && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <div className="h-2/3 w-2/3 rounded-lg border-2 border-white/70 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
+              <div
+                className={`h-2/3 w-2/3 rounded-lg border-2 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)] ${
+                  scanMode === "location" ? "border-amber-400" : "border-white/70"
+                }`}
+              />
+            </div>
+          )}
+          {scanning && scanMode === "location" && (
+            <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-full bg-amber-500/90 px-3 py-1 text-xs font-medium text-black">
+              Scanning for a location marker…
             </div>
           )}
         </div>
@@ -533,6 +663,24 @@ export default function ScanPage() {
           </div>
         )}
 
+        {/* Current receive location — persists across scans; set/changed via Reassign. */}
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-black/10 px-3 py-2 dark:border-white/15">
+          <div className="min-w-0 text-sm">
+            <span className="text-black/50 dark:text-white/50">Receiving into: </span>
+            {currentLoc ? (
+              <span className="font-medium">{currentLoc.name}</span>
+            ) : (
+              <span className="text-amber-600 dark:text-amber-400">no location set</span>
+            )}
+          </div>
+          <button
+            className="shrink-0 rounded-md border border-black/15 px-3 py-1.5 text-sm hover:bg-black/[0.03] dark:border-white/20 dark:hover:bg-white/[0.04]"
+            onClick={() => setLocPickerOpen(true)}
+          >
+            {currentLoc ? "Reassign" : "Set location"}
+          </button>
+        </div>
+
         <div className="mt-3 flex gap-2">
           <input
             className={inputClass}
@@ -547,103 +695,168 @@ export default function ScanPage() {
             Parse
           </button>
         </div>
-
-        <form
-          onSubmit={receive}
-          className="mt-5 space-y-3 rounded-xl border border-black/10 p-4 dark:border-white/15"
+        <button
+          className="mt-2 text-sm text-black/50 underline hover:text-black/80 dark:text-white/50 dark:hover:text-white/80"
+          onClick={() => setReceiveOpen(true)}
         >
-          <h2 className="font-medium">Receive</h2>
-          {scanInfo && (
-            <p className="text-sm text-black/60 dark:text-white/60">Scanned: {scanInfo}</p>
-          )}
-          {rawText && (
-            <p className="select-all break-all rounded bg-black/5 px-2 py-1 font-mono text-[10px] text-black/50 dark:bg-white/5 dark:text-white/50">
-              {rawText.split(GS).join("[GS]").split(RS).join("[RS]").split(EOT).join("[EOT]")}
+          Enter receive details manually
+        </button>
+
+        {receiveOpen && (
+          <Sheet title="Review &amp; receive" onClose={() => setReceiveOpen(false)}>
+            <form onSubmit={receive} className="space-y-3">
+              {scanInfo && (
+                <p className="text-sm text-black/60 dark:text-white/60">Scanned: {scanInfo}</p>
+              )}
+              {rawText && (
+                <p className="select-all break-all rounded bg-black/5 px-2 py-1 font-mono text-[10px] text-black/50 dark:bg-white/5 dark:text-white/50">
+                  {rawText.split(GS).join("[GS]").split(RS).join("[RS]").split(EOT).join("[EOT]")}
+                </p>
+              )}
+              <input
+                className={inputClass}
+                placeholder="MPN"
+                value={mpn}
+                onChange={(e) => setMpn(e.target.value)}
+              />
+              {looking && <p className="text-xs text-black/50 dark:text-white/50">Reading part info…</p>}
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  className={inputClass}
+                  placeholder="Supplier (DigiKey/LCSC…)"
+                  value={supplier}
+                  onChange={(e) => setSupplier(e.target.value)}
+                />
+                <input
+                  className={inputClass}
+                  placeholder="Supplier part # (e.g. LCSC C-code)"
+                  value={spn}
+                  onChange={(e) => setSpn(e.target.value)}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  className={inputClass}
+                  placeholder="Category"
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                />
+                <input
+                  className={inputClass}
+                  placeholder="Size (0603, TH…)"
+                  value={pkg}
+                  onChange={(e) => setPkg(e.target.value)}
+                />
+              </div>
+              <input
+                className={inputClass}
+                placeholder="Manufacturer"
+                value={manufacturer}
+                onChange={(e) => setManufacturer(e.target.value)}
+              />
+              <input
+                className={inputClass}
+                placeholder="Name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+              <input
+                className={inputClass}
+                type="number"
+                min={1}
+                inputMode="numeric"
+                placeholder="Quantity"
+                value={qty}
+                onChange={(e) => setQty(e.target.value)}
+              />
+              <div className="flex items-center justify-between gap-2 rounded-md bg-black/[0.03] px-3 py-2 text-sm dark:bg-white/[0.04]">
+                <span className="min-w-0 truncate">
+                  <span className="text-black/50 dark:text-white/50">Into: </span>
+                  {currentLoc ? (
+                    <span className="font-medium">{currentLoc.name}</span>
+                  ) : (
+                    <span className="text-amber-600 dark:text-amber-400">no location set</span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="shrink-0 text-blue-600 underline dark:text-blue-400"
+                  onClick={() => setLocPickerOpen(true)}
+                >
+                  {currentLoc ? "Change" : "Set"}
+                </button>
+              </div>
+              {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  className="flex-1 rounded-md border border-black/15 px-4 py-2 font-medium dark:border-white/20"
+                  onClick={() => setReceiveOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 rounded-md bg-green-700 px-4 py-2 font-medium text-white hover:bg-green-600 disabled:opacity-50"
+                  disabled={!mpn.trim() || !locationId || !qty}
+                >
+                  Receive into stock
+                </button>
+              </div>
+            </form>
+          </Sheet>
+        )}
+
+        {locPickerOpen && (
+          <Sheet title="Set receive location" onClose={() => setLocPickerOpen(false)}>
+            <button
+              className="w-full rounded-md bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+              onClick={() => void beginLocationScan()}
+              disabled={locations.every((l) => l.aruco === null)}
+            >
+              Scan a location marker
+            </button>
+            <p className="mt-2 text-xs text-black/50 dark:text-white/50">
+              Point the camera at a location&rsquo;s printed ArUco marker — it sets the location and
+              jumps straight to scanning parts.
+              {locations.length > 0 && locations.every((l) => l.aruco === null) && (
+                <> No location has a marker yet — assign one on the Locations tab.</>
+              )}
             </p>
-          )}
-          <input
-            className={inputClass}
-            placeholder="MPN"
-            value={mpn}
-            onChange={(e) => setMpn(e.target.value)}
-          />
-          {looking && (
-            <p className="text-xs text-black/50 dark:text-white/50">Reading part info…</p>
-          )}
-          <div className="grid grid-cols-2 gap-2">
-            <input
+
+            <div className="my-4 flex items-center gap-3 text-xs text-black/40 dark:text-white/40">
+              <span className="h-px flex-1 bg-black/10 dark:bg-white/15" />
+              or pick manually
+              <span className="h-px flex-1 bg-black/10 dark:bg-white/15" />
+            </div>
+
+            <select
               className={inputClass}
-              placeholder="Supplier (DigiKey/LCSC…)"
-              value={supplier}
-              onChange={(e) => setSupplier(e.target.value)}
-            />
-            <input
-              className={inputClass}
-              placeholder="Supplier part # (e.g. LCSC C-code)"
-              value={spn}
-              onChange={(e) => setSpn(e.target.value)}
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <input
-              className={inputClass}
-              placeholder="Category"
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-            />
-            <input
-              className={inputClass}
-              placeholder="Size (0603, TH…)"
-              value={pkg}
-              onChange={(e) => setPkg(e.target.value)}
-            />
-          </div>
-          <input
-            className={inputClass}
-            placeholder="Manufacturer"
-            value={manufacturer}
-            onChange={(e) => setManufacturer(e.target.value)}
-          />
-          <input
-            className={inputClass}
-            placeholder="Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-          <select
-            className={inputClass}
-            value={locationId}
-            onChange={(e) => setLocationId(e.target.value ? Number(e.target.value) : "")}
-          >
-            <option value="">Select location…</option>
-            {locations.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.name}
-              </option>
-            ))}
-          </select>
-          <input
-            className={inputClass}
-            type="number"
-            min={1}
-            inputMode="numeric"
-            placeholder="Quantity"
-            value={qty}
-            onChange={(e) => setQty(e.target.value)}
-          />
-          <button
-            type="submit"
-            className="w-full rounded-md bg-green-700 px-4 py-2 font-medium text-white hover:bg-green-600 disabled:opacity-50"
-            disabled={!mpn.trim() || !locationId || !qty}
-          >
-            Receive into stock
-          </button>
-          {locations.length === 0 && (
-            <p className="text-sm text-amber-600 dark:text-amber-400">
-              Add a location first (Inventory tab).
-            </p>
-          )}
-        </form>
+              value={locationId}
+              onChange={(e) => setLocationId(e.target.value ? Number(e.target.value) : "")}
+            >
+              <option value="">Select location…</option>
+              {locations.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                  {l.aruco !== null ? ` (#${l.aruco})` : ""}
+                </option>
+              ))}
+            </select>
+            <button
+              className="mt-3 w-full rounded-md border border-black/15 px-4 py-2 font-medium disabled:opacity-50 dark:border-white/20"
+              onClick={() => setLocPickerOpen(false)}
+              disabled={!locationId}
+            >
+              Use this location
+            </button>
+            {locations.length === 0 && (
+              <p className="mt-2 text-sm text-amber-600 dark:text-amber-400">
+                No locations yet — add some on the Locations tab.
+              </p>
+            )}
+          </Sheet>
+        )}
       </main>
     </>
   );

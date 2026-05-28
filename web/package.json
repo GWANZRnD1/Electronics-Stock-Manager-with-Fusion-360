@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
+    "js-aruco2": "^2.0.0",
     "next": "16.2.6",
     "papaparse": "^5.5.3",
     "postgres": "^3.4.9",
