@@ -92,7 +92,12 @@ export async function renderGerber(files: Record<string, Uint8Array>): Promise<G
   const candidates = Object.entries(files)
     .filter(
       ([name, data]) =>
-        !name.endsWith("/") && data.length > 0 && !looksLikePlacementFile(name) && !/\.(json|md|pdf)$/i.test(name),
+        !name.endsWith("/") &&
+        data.length > 0 &&
+        !looksLikePlacementFile(name) &&
+        // .gbrjob is a Gerber *job* metadata file (JSON), not a board layer —
+        // Fusion names it gerber_job.* and it otherwise renders as a scribble.
+        !/\.(json|md|pdf|gbrjob)$/i.test(name),
     )
     .map(([name, data]) => ({
       filename: name.split("/").pop() ?? name, // whats-that-gerber keys on the basename
