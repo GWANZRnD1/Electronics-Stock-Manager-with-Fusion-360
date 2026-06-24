@@ -299,12 +299,6 @@ export default function BoardViewPage() {
         classification?: { file: string; type: string | null; side: string | null; rendered: boolean }[];
       }>(`/api/boards/${id}/image/gerber`, form);
 
-      // Diagnostic: which file became which layer (and what got skipped).
-      if (r.classification) {
-        // eslint-disable-next-line no-console
-        console.table(r.classification);
-      }
-
       for (const ren of r.renders) {
         const ras = await rasterizeSvg(ren.svg);
         const f = new FormData();
@@ -328,7 +322,7 @@ export default function BoardViewPage() {
           (r.placements
             ? ` Imported ${r.placements} placements from the pick-and-place file.`
             : " No pick-and-place file in the zip — import placements with extract-board.ulp to enable highlighting.") +
-          (r.ignored?.length ? ` Skipped non-board files: ${r.ignored.join(", ")}.` : ""),
+          (r.ignored?.length ? ` Skipped (not part of the picture): ${r.ignored.join(", ")}.` : ""),
       );
     } catch (e) {
       if (e instanceof Error && e.message !== "locked") setError(e.message);

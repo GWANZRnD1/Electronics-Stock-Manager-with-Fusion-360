@@ -16,19 +16,18 @@ import whatsThatGerber from "whats-that-gerber";
 
 import { looksLikePlacementFile } from "./placements";
 
-// Only these layer types describe the physical board and should be rendered.
-// Everything whats-that-gerber tags as "drawing" (assembly / unrouted-airwires /
-// ratsnest exports) or null (EAGLE/Fusion .gpi photoplotter-info, .dri drill-rack
-// sidecars, logs) is NOT a board layer — feeding it to pcb-stackup draws a garbage
-// scribble of lines across the board, so we drop it.
-const DRAWABLE_TYPES = new Set([
-  "copper",
-  "soldermask",
-  "silkscreen",
-  "solderpaste",
-  "drill",
-  "outline",
-]);
+// Layer types we render for the assembly *picture*. We deliberately exclude:
+//   - "drawing"  — assembly / unrouted-airwires / ratsnest exports
+//   - null       — EAGLE/Fusion .gpi photoplotter-info, .dri drill-rack sidecars, logs
+//   - "drill"    — Excellon drill files. pcb-stackup feeds drills into its mechanical
+//                  MASK (they punch holes through the board). EAGLE/Autodesk Excellon
+//                  (e.g. "METRIC,TZ,000.000") is mis-parsed by pcb-stackup's drill
+//                  parser into garbage geometry, which punches a scribble of holes that
+//                  reveals the page background *through* the board (looks like white/black
+//                  lines that flip with the theme). The assembly view doesn't need drill
+//                  holes, so dropping the drill layer yields a clean board.
+// Everything not in this set is reported in `ignored` (shown in the upload banner).
+const DRAWABLE_TYPES = new Set(["copper", "soldermask", "silkscreen", "solderpaste", "outline"]);
 
 export interface MmBbox {
   minX: number;
