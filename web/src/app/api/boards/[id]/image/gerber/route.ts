@@ -66,5 +66,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     placements = pnp.length;
   }
 
-  return NextResponse.json({ ok: true, layers: render.layerCount, placements, renders });
+  return NextResponse.json({
+    ok: true,
+    layers: render.layerCount,
+    ignored: render.ignored,
+    placements,
+    renders,
+  });
 }

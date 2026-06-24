@@ -290,6 +290,7 @@ export default function BoardViewPage() {
       const r = await jupload<{
         renders: { side: Side; svg: string; mmBbox: Outline }[];
         placements: number;
+        ignored?: string[];
       }>(`/api/boards/${id}/image/gerber`, form);
 
       for (const ren of r.renders) {
@@ -314,7 +315,8 @@ export default function BoardViewPage() {
         `Rendered ${sides.join(" + ")}.` +
           (r.placements
             ? ` Imported ${r.placements} placements from the pick-and-place file.`
-            : " No pick-and-place file in the zip — import placements with extract-board.ulp to enable highlighting."),
+            : " No pick-and-place file in the zip — import placements with extract-board.ulp to enable highlighting.") +
+          (r.ignored?.length ? ` Skipped non-board files: ${r.ignored.join(", ")}.` : ""),
       );
     } catch (e) {
       if (e instanceof Error && e.message !== "locked") setError(e.message);

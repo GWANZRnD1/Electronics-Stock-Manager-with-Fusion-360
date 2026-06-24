@@ -12,8 +12,23 @@
  */
 import { strFromU8, unzipSync } from "fflate";
 import pcbStackup from "pcb-stackup";
+import whatsThatGerber from "whats-that-gerber";
 
 import { looksLikePlacementFile } from "./placements";
+
+// Only these layer types describe the physical board and should be rendered.
+// Everything whats-that-gerber tags as "drawing" (assembly / unrouted-airwires /
+// ratsnest exports) or null (EAGLE/Fusion .gpi photoplotter-info, .dri drill-rack
+// sidecars, logs) is NOT a board layer — feeding it to pcb-stackup draws a garbage
+// scribble of lines across the board, so we drop it.
+const DRAWABLE_TYPES = new Set([
+  "copper",
+  "soldermask",
+  "silkscreen",
+  "solderpaste",
+  "drill",
+  "outline",
+]);
 
 export interface MmBbox {
   minX: number;
@@ -33,6 +48,7 @@ export interface GerberRender {
   top?: RenderedSide;
   bottom?: RenderedSide;
   layerCount: number;
+  ignored: string[]; // files skipped as non-board layers (drawing / unknown)
 }
 
 interface StackupSide {
@@ -72,7 +88,8 @@ export function unzipArchive(buf: Uint8Array): Record<string, Uint8Array> {
 
 /** Render both board sides from an unzipped file map (ignores placement files). */
 export async function renderGerber(files: Record<string, Uint8Array>): Promise<GerberRender> {
-  const layers = Object.entries(files)
+  // Candidate files: real files, not placement/docs sidecars.
+  const candidates = Object.entries(files)
     .filter(
       ([name, data]) =>
         !name.endsWith("/") && data.length > 0 && !looksLikePlacementFile(name) && !/\.(json|md|pdf)$/i.test(name),
@@ -81,6 +98,18 @@ export async function renderGerber(files: Record<string, Uint8Array>): Promise<G
       filename: name.split("/").pop() ?? name, // whats-that-gerber keys on the basename
       gerber: strFromU8(data),
     }));
+
+  // Classify by filename and keep only real board layers — drop "drawing"
+  // (unrouted airwires / assembly drawings) and unknown (.gpi/.dri/logs) files,
+  // which otherwise render as a scribble across the board.
+  const types = whatsThatGerber(candidates.map((c) => c.filename));
+  const ignored: string[] = [];
+  const layers = candidates.filter((c) => {
+    const type = types[c.filename]?.type;
+    if (type && DRAWABLE_TYPES.has(type)) return true;
+    ignored.push(c.filename);
+    return false;
+  });
 
   if (layers.length === 0) throw new Error("no Gerber layers found in the zip");
 
@@ -93,6 +122,7 @@ export async function renderGerber(files: Record<string, Uint8Array>): Promise<G
     top: toSide(stackup.top),
     bottom: toSide(stackup.bottom),
     layerCount: layers.length,
+    ignored,
   };
 }
 
