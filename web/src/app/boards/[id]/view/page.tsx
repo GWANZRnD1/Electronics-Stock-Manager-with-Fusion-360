@@ -252,7 +252,9 @@ export default function BoardViewPage() {
     }
   }
 
-  // Render top/bottom from a Gerber zip — auto-aligned (no calibration needed).
+  // Render top/bottom from a Gerber zip. The server returns the SVGs; we
+  // rasterize each to a compact WebP in the browser (keeps the server under its
+  // memory limit), upload it, and set the render's mm bbox as calibration.
   async function uploadGerber(file: File) {
     setBusy(true);
     setError("");
@@ -260,17 +262,34 @@ export default function BoardViewPage() {
     try {
       const form = new FormData();
       form.set("file", file);
-      const r = await jupload<{ sides: Side[]; placements: number }>(
-        `/api/boards/${id}/image/gerber`,
-        form,
-      );
+      const r = await jupload<{
+        renders: { side: Side; svg: string; mmBbox: Outline }[];
+        placements: number;
+      }>(`/api/boards/${id}/image/gerber`, form);
+
+      for (const ren of r.renders) {
+        const ras = await rasterizeSvg(ren.svg);
+        const f = new FormData();
+        const ext = ras.blob.type === "image/webp" ? "webp" : "png";
+        f.set("file", new File([ras.blob], `${ren.side}.${ext}`, { type: ras.blob.type }));
+        f.set("side", ren.side);
+        f.set("width", String(ras.width));
+        f.set("height", String(ras.height));
+        await jupload(`/api/boards/${id}/image`, f);
+        await jput(`/api/boards/${id}/image/calibration`, {
+          side: ren.side,
+          calibration: bboxToCalibration(ren.side, ren.mmBbox),
+        });
+      }
+
       await reloadBundle();
-      if (r.sides.length) setSide(r.sides.includes(side) ? side : r.sides[0]);
+      const sides = r.renders.map((x) => x.side);
+      if (sides.length) setSide(sides.includes(side) ? side : sides[0]);
       setInfo(
-        `Rendered ${r.sides.join(" + ")}.` +
+        `Rendered ${sides.join(" + ")}.` +
           (r.placements
             ? ` Imported ${r.placements} placements from the pick-and-place file.`
-            : " No pick-and-place file in the zip — import placements with extract-placements.ulp to enable highlighting."),
+            : " No pick-and-place file in the zip — import placements with extract-board.ulp to enable highlighting."),
       );
     } catch (e) {
       if (e instanceof Error && e.message !== "locked") setError(e.message);
@@ -1079,6 +1098,60 @@ function BarcodeScanModal({
 }
 
 // ---------------------------------------------------------------------------
+// Encode a render's mm bounding box as the 2-point calibration (image corner ↔
+// board-mm corner). The bottom render is mirrored, so its top-left corner maps
+// to board (maxX, maxY) rather than (minX, maxY).
+function bboxToCalibration(side: Side, b: Outline): [CalPoint, CalPoint] {
+  return side === "bottom"
+    ? [
+        { frac: { x: 0, y: 0 }, mm: { x: b.maxX, y: b.maxY } },
+        { frac: { x: 1, y: 1 }, mm: { x: b.minX, y: b.minY } },
+      ]
+    : [
+        { frac: { x: 0, y: 0 }, mm: { x: b.minX, y: b.maxY } },
+        { frac: { x: 1, y: 1 }, mm: { x: b.maxX, y: b.minY } },
+      ];
+}
+
+// Rasterize a board SVG to a compact WebP in the browser (one-time draw to a
+// canvas, then discard) — the live viewer only ever shows the light WebP.
+async function rasterizeSvg(
+  svg: string,
+  targetLong = 1800,
+): Promise<{ blob: Blob; width: number; height: number }> {
+  const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+  try {
+    const img = new Image();
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res();
+      img.onerror = () => rej(new Error("could not render the board SVG"));
+      img.src = url;
+    });
+    let w = img.naturalWidth || img.width;
+    let h = img.naturalHeight || img.height;
+    if (!w || !h) {
+      w = targetLong;
+      h = targetLong;
+    }
+    const scale = targetLong / Math.max(w, h);
+    const cw = Math.max(1, Math.round(w * scale));
+    const ch = Math.max(1, Math.round(h * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas unavailable");
+    ctx.drawImage(img, 0, 0, cw, ch);
+    const blob =
+      (await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/webp", 0.8))) ??
+      (await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png")));
+    if (!blob) throw new Error("rasterization failed");
+    return { blob, width: cw, height: ch };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function imageDimensions(file: File): Promise<{ w: number; h: number }> {
   try {
     const bmp = await createImageBitmap(file);

@@ -1,44 +1,23 @@
 import { NextResponse } from "next/server";
 
 import { getBoard, replacePlacements } from "@/lib/repo/boards";
-import { type BoardSide, setCalibration, upsertBoardImage } from "@/lib/repo/boardImages";
 import { parsePickAndPlace } from "@/lib/gerber/placements";
-import { svgToWebp } from "@/lib/gerber/raster";
-import { type MmBbox, renderGerber, unzipArchive } from "@/lib/gerber/render";
-import { storageConfigured, uploadObject } from "@/lib/storage/supabase";
+import { renderGerber, unzipArchive } from "@/lib/gerber/render";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Encode a rendered side's mm bounding box as the existing 2-point calibration
- * (image corner ↔ board-mm corner) so the Assembly view's mapper aligns the
- * highlights to the render automatically. The bottom render is mirrored, so its
- * top-left corner maps to board (maxX, maxY) rather than (minX, maxY).
+ * Render a Gerber zip to top/bottom SVG and import any pick-and-place placements.
+ * The SVGs are RETURNED to the client (not stored): the browser rasterizes them
+ * to a compact WebP and uploads that via /api/boards/[id]/image, then sets the
+ * render's mm bbox as calibration. Rasterizing client-side keeps this function
+ * well under the serverless memory limit (resvg+sharp here OOM'd it).
  */
-function bboxToCalibration(side: BoardSide, b: MmBbox) {
-  return side === "bottom"
-    ? [
-        { frac: { x: 0, y: 0 }, mm: { x: b.maxX, y: b.maxY } },
-        { frac: { x: 1, y: 1 }, mm: { x: b.minX, y: b.minY } },
-      ]
-    : [
-        { frac: { x: 0, y: 0 }, mm: { x: b.minX, y: b.maxY } },
-        { frac: { x: 1, y: 1 }, mm: { x: b.maxX, y: b.minY } },
-      ];
-}
-
-/** Upload a Gerber zip; render top/bottom to SVG and store them as board images. */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const boardId = Number((await params).id);
   if (!Number.isInteger(boardId)) {
     return NextResponse.json({ error: "invalid board id" }, { status: 400 });
-  }
-  if (!storageConfigured()) {
-    return NextResponse.json(
-      { error: "image storage isn't configured — set SUPABASE_SECRET_KEY in web/.env.local" },
-      { status: 503 },
-    );
   }
   if (!(await getBoard(boardId))) {
     return NextResponse.json({ error: "board not found" }, { status: 404 });
@@ -65,47 +44,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
   }
 
-  const sides: { side: BoardSide; rendered: typeof render.top }[] = [
-    { side: "top", rendered: render.top },
-    { side: "bottom", rendered: render.bottom },
-  ];
-  const done: BoardSide[] = [];
-  try {
-    for (const { side, rendered } of sides) {
-      if (!rendered) continue;
-      // Rasterize to a compact WebP; fall back to the raw SVG if sharp can't.
-      let bytes: Uint8Array;
-      let mime: string;
-      let ext: string;
-      let width = rendered.widthPx;
-      let height = rendered.heightPx;
-      try {
-        const r = await svgToWebp(rendered.svg, rendered.mmBbox);
-        bytes = r.buf;
-        mime = "image/webp";
-        ext = "webp";
-        width = r.width;
-        height = r.height;
-      } catch {
-        bytes = new TextEncoder().encode(rendered.svg);
-        mime = "image/svg+xml";
-        ext = "svg";
-      }
-      const path = `boards/${boardId}/${side}.${ext}`;
-      await uploadObject(path, bytes, mime);
-      await upsertBoardImage({ boardId, side, storagePath: path, mime, width, height });
-      // upsert clears any prior calibration; set the render-derived alignment.
-      await setCalibration(boardId, side, JSON.stringify(bboxToCalibration(side, rendered.mmBbox)));
-      done.push(side);
-    }
-  } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "failed to store the rendered images" },
-      { status: 502 },
-    );
-  }
+  const renders = (["top", "bottom"] as const)
+    .map((side) => ({ side, rendered: side === "top" ? render.top : render.bottom }))
+    .filter((r) => r.rendered)
+    .map((r) => ({ side: r.side, svg: r.rendered!.svg, mmBbox: r.rendered!.mmBbox }));
 
-  if (done.length === 0) {
+  if (renders.length === 0) {
     return NextResponse.json(
       { error: "no renderable copper/outline layers were found in the zip" },
       { status: 400 },
@@ -122,5 +66,5 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     placements = pnp.length;
   }
 
-  return NextResponse.json({ ok: true, sides: done, layers: render.layerCount, placements });
+  return NextResponse.json({ ok: true, layers: render.layerCount, placements, renders });
 }
