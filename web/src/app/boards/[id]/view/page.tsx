@@ -122,6 +122,7 @@ export default function BoardViewPage() {
   // Calibration + scanning UI.
   const [calStep, setCalStep] = useState<0 | 1 | 2>(0); // 0 off, 1 click first, 2 click second
   const calRefsRef = useRef<{ a?: CalPoint; b?: CalPoint }>({});
+  const gerberRef = useRef<HTMLInputElement>(null);
   const [calTargets, setCalTargets] = useState<[Placement, Placement] | null>(null);
   const [scanOpen, setScanOpen] = useState(false);
 
@@ -243,6 +244,23 @@ export default function BoardViewPage() {
       await jupload(`/api/boards/${id}/image`, form);
       await reloadBundle();
       setSide(forSide);
+    } catch (e) {
+      if (e instanceof Error && e.message !== "locked") setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Render top/bottom from a Gerber zip — auto-aligned (no calibration needed).
+  async function uploadGerber(file: File) {
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.set("file", file);
+      const r = await jupload<{ sides: Side[] }>(`/api/boards/${id}/image/gerber`, form);
+      await reloadBundle();
+      if (r.sides.length) setSide(r.sides.includes(side) ? side : r.sides[0]);
     } catch (e) {
       if (e instanceof Error && e.message !== "locked") setError(e.message);
     } finally {
@@ -452,7 +470,30 @@ export default function BoardViewPage() {
             />
 
             {/* Upload controls */}
-            <div className="mt-3 flex flex-wrap gap-2">
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                className="rounded-md bg-blue-600 px-2.5 py-1 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                disabled={busy}
+                onClick={() => gerberRef.current?.click()}
+              >
+                {busy ? "Working…" : "Upload Gerber zip (auto-align)"}
+              </button>
+              <input
+                ref={gerberRef}
+                type="file"
+                accept=".zip,application/zip"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (f) uploadGerber(f);
+                }}
+              />
+              <span className="text-xs text-black/40 dark:text-white/40">
+                renders top + bottom, aligned automatically
+              </span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
               <ImageUploader label={hasTop ? "Replace top image" : "Upload top image"} side="top" busy={busy} onPick={uploadImage} />
               {hasTop && (
                 <button className={btn} disabled={busy} onClick={() => removeImage("top")}>

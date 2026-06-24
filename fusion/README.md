@@ -77,6 +77,31 @@ What it does:
 > Designators in the CSV are space-joined (not comma) on purpose: the paste box
 > splits each line on `,`, so a comma inside a field would shift the columns.
 
+## Board pictures + part highlighting (Assembly view)
+
+The app's per-board **Assembly view** (`/boards/[id]/view`) shows the board, lets
+you click a BOM part (or scan its barcode) to highlight where it sits, with
+zoom/pan and a filterable/sortable BOM.
+
+1. **Placements** — open the design in the **Board** editor, **Automate → Run ULP
+   →** `ulp/extract-placements.ulp`. It writes `<name>-placements.json`
+   (designator, X/Y mm, rotation, side, package, MPN + the board outline). In the
+   app, open the board → **Import placements (.json)**.
+2. **A picture** — two ways:
+   - **Gerber zip (recommended):** in the Assembly view click **Upload Gerber zip
+     (auto-align)**. The app renders top + bottom from the Gerbers and aligns the
+     highlights automatically (the render is cropped to the board outline, so no
+     calibration is needed). Export a standard Gerber+drill set from Fusion's CAM
+     (standard extensions: `.gtl/.gbl/.gto/.gbo/.gts/.gbs/.gko` + drill) and zip them.
+   - **Top/bottom images:** upload a PNG/JPG per side (a Fusion **Export Image**, a
+     straight-down photo of the bare board, or a Gerber render). Crop tightly to
+     the board edge; if highlights are slightly off, click **Calibrate** and click
+     the two parts it names to lock the alignment.
+
+Image bytes live in a private Supabase Storage bucket (`board-images`) — set
+`SUPABASE_SECRET_KEY` (see `web/.env.example`). Highlighting works on the
+placement grid even before any picture is uploaded.
+
 ## Bulk-rename library attributes (e.g. `Digikey` → `SPN`)
 
 `ulp/rename-library-attributes.ulp` renames a device attribute across **every**
