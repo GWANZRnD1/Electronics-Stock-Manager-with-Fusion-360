@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { getBoard, replacePlacements } from "@/lib/repo/boards";
 import { type BoardSide, setCalibration, upsertBoardImage } from "@/lib/repo/boardImages";
 import { parsePickAndPlace } from "@/lib/gerber/placements";
+import { svgToWebp } from "@/lib/gerber/raster";
 import { type MmBbox, renderGerber, unzipArchive } from "@/lib/gerber/render";
 import { storageConfigured, uploadObject } from "@/lib/storage/supabase";
 
@@ -72,16 +73,27 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   try {
     for (const { side, rendered } of sides) {
       if (!rendered) continue;
-      const path = `boards/${boardId}/${side}.svg`;
-      await uploadObject(path, new TextEncoder().encode(rendered.svg), "image/svg+xml");
-      await upsertBoardImage({
-        boardId,
-        side,
-        storagePath: path,
-        mime: "image/svg+xml",
-        width: rendered.widthPx,
-        height: rendered.heightPx,
-      });
+      // Rasterize to a compact WebP; fall back to the raw SVG if sharp can't.
+      let bytes: Uint8Array;
+      let mime: string;
+      let ext: string;
+      let width = rendered.widthPx;
+      let height = rendered.heightPx;
+      try {
+        const r = await svgToWebp(rendered.svg, rendered.mmBbox);
+        bytes = r.buf;
+        mime = "image/webp";
+        ext = "webp";
+        width = r.width;
+        height = r.height;
+      } catch {
+        bytes = new TextEncoder().encode(rendered.svg);
+        mime = "image/svg+xml";
+        ext = "svg";
+      }
+      const path = `boards/${boardId}/${side}.${ext}`;
+      await uploadObject(path, bytes, mime);
+      await upsertBoardImage({ boardId, side, storagePath: path, mime, width, height });
       // upsert clears any prior calibration; set the render-derived alignment.
       await setCalibration(boardId, side, JSON.stringify(bboxToCalibration(side, rendered.mmBbox)));
       done.push(side);

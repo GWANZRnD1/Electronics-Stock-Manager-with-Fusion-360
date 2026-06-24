@@ -706,33 +706,12 @@ function BoardCanvas({
     if (h) setContentH(h);
   }, []);
 
-  // Auto zoom/pan so the selected part(s) sit centred and prominent.
+  // Selecting a part fits the whole board, so the red arrow from the centre and
+  // the box around the part are both visible.
   useEffect(() => {
-    const el = viewportRef.current;
-    if (!el || !mapper) return;
-    const pts = placements
-      .filter((p) => selected.has(norm(p.designator)))
-      .map((p) => mapper(p.x, p.y))
-      .filter((f) => Number.isFinite(f.fx) && Number.isFinite(f.fy));
-    if (pts.length === 0) return; // nothing selected on this side — leave the view as-is
-    let minx = 1, miny = 1, maxx = 0, maxy = 0;
-    for (const { fx, fy } of pts) {
-      minx = Math.min(minx, fx);
-      miny = Math.min(miny, fy);
-      maxx = Math.max(maxx, fx);
-      maxy = Math.max(maxy, fy);
-    }
-    const r = el.getBoundingClientRect();
-    const bw = (maxx - minx) * W0;
-    const bh = (maxy - miny) * contentH;
-    const fill = 0.5; // the selection fills ~half the viewport
-    let scale = bw < 4 && bh < 4 ? 5 : Math.min((r.width * fill) / bw, (r.height * fill) / bh);
-    scale = Math.min(8, Math.max(0.5, scale));
-    const cx = ((minx + maxx) / 2) * W0;
-    const cy = ((miny + maxy) / 2) * contentH;
-    setAnimate(true);
-    setView({ scale, tx: r.width / 2 - scale * cx, ty: r.height / 2 - scale * cy });
-  }, [selected, mapper, placements, contentH]);
+    if (!mapper) return;
+    if (placements.some((p) => selected.has(norm(p.designator)))) fitView();
+  }, [selected, mapper, placements, contentH, fitView]);
 
   // Fit on side change for the no-image case (the image's onLoad handles the rest).
   useEffect(() => {
@@ -867,6 +846,51 @@ function BoardCanvas({
               />
             )}
 
+            {/* Red arrow(s) from the board centre to the selected part(s) */}
+            {mapper &&
+              (() => {
+                const sel = placements.filter((p) => selected.has(norm(p.designator)));
+                if (sel.length === 0) return null;
+                return (
+                  <svg
+                    className="pointer-events-none absolute left-0 top-0"
+                    width={W0}
+                    height={contentH}
+                    viewBox={`0 0 ${W0} ${contentH}`}
+                  >
+                    <defs>
+                      <marker
+                        id="arrowhead"
+                        markerUnits="userSpaceOnUse"
+                        markerWidth="22"
+                        markerHeight="22"
+                        refX="15"
+                        refY="8"
+                        orient="auto"
+                      >
+                        <path d="M0,0 L16,8 L0,16 Z" fill="#ef4444" />
+                      </marker>
+                    </defs>
+                    {sel.map((p) => {
+                      const { fx, fy } = mapper(p.x, p.y);
+                      if (!Number.isFinite(fx) || !Number.isFinite(fy)) return null;
+                      return (
+                        <line
+                          key={p.id}
+                          x1={W0 / 2}
+                          y1={contentH / 2}
+                          x2={fx * W0}
+                          y2={fy * contentH}
+                          stroke="#ef4444"
+                          strokeWidth={5}
+                          markerEnd="url(#arrowhead)"
+                        />
+                      );
+                    })}
+                  </svg>
+                );
+              })()}
+
             {/* Selected part box(es) */}
             {mapper &&
               placements
@@ -880,7 +904,7 @@ function BoardCanvas({
                       className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2"
                       style={{ left: `${fx * 100}%`, top: `${fy * 100}%` }}
                     >
-                      <div className="h-[34px] w-[34px] rounded-[3px] border-2 border-amber-400 bg-amber-400/15 shadow-[0_0_0_2px_rgba(0,0,0,0.5)]" />
+                      <div className="h-[34px] w-[34px] rounded-[3px] border-2 border-red-500 bg-red-500/20 shadow-[0_0_0_2px_rgba(0,0,0,0.55)]" />
                     </div>
                   );
                 })}
