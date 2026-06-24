@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 
-import { getBoard, getBoardBom, replaceBom } from "@/lib/repo/boards";
+import { getBoard, getBoardBom, getBoardBomDetailed, replaceBom } from "@/lib/repo/boards";
 import { replaceBomSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const boardId = Number((await params).id);
   if (!Number.isInteger(boardId)) {
     return NextResponse.json({ error: "invalid board id" }, { status: 400 });
@@ -14,7 +14,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   if (!(await getBoard(boardId))) {
     return NextResponse.json({ error: "board not found" }, { status: 404 });
   }
-  return NextResponse.json(await getBoardBom(boardId));
+  // ?detail=1 enriches each line with catalog (manufacturer/supplier/SPN/cost) + stock.
+  const detail = new URL(req.url).searchParams.get("detail");
+  return NextResponse.json(detail ? await getBoardBomDetailed(boardId) : await getBoardBom(boardId));
 }
 
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {

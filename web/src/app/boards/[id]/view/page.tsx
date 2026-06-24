@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReaderOptions } from "zxing-wasm/reader";
 
 import { Nav } from "@/components/Nav";
@@ -21,6 +21,12 @@ interface BomRow {
   package: string;
   designators: string;
   qtyPerBoard: number;
+  // Enriched from the catalog (via ?detail=1); absent until that fetch resolves.
+  manufacturer?: string;
+  supplier?: string;
+  spn?: string; // supplier part number, e.g. the DigiKey code
+  unitCost?: string | null;
+  onHand?: number;
 }
 
 interface Placement {
@@ -91,6 +97,41 @@ function makeMapper(
 const norm = (s: string) => s.trim().toUpperCase();
 const splitDesignators = (s: string): string[] =>
   s.split(/[\s,]+/).map((d) => d.trim()).filter(Boolean);
+const countDesignators = (s: string): number => splitDesignators(s).length;
+
+// A distributor product link for a supplier part number, when we recognise the
+// supplier; otherwise null (we just show the code as text).
+function supplierUrl(supplier: string, spn: string): string | null {
+  if (!spn) return null;
+  const s = supplier.toLowerCase();
+  if (s.includes("digikey") || s.includes("digi-key"))
+    return `https://www.digikey.com/en/products/result?keywords=${encodeURIComponent(spn)}`;
+  if (s.includes("mouser"))
+    return `https://www.mouser.com/c/?q=${encodeURIComponent(spn)}`;
+  if (s.includes("lcsc"))
+    return `https://www.lcsc.com/search?q=${encodeURIComponent(spn)}`;
+  return null;
+}
+
+// Per-board "populated" build progress lives in localStorage (a workshop session
+// state, not catalog data) — keyed by board id, storing the populated BOM line ids.
+const populatedKey = (boardId: string) => `ecsm:populated:${boardId}`;
+function loadPopulated(boardId: string): Set<number> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(populatedKey(boardId));
+    return new Set(raw ? (JSON.parse(raw) as number[]) : []);
+  } catch {
+    return new Set();
+  }
+}
+function savePopulated(boardId: string, ids: Set<number>) {
+  try {
+    window.localStorage.setItem(populatedKey(boardId), JSON.stringify([...ids]));
+  } catch {
+    /* ignore quota / disabled storage */
+  }
+}
 
 const btn =
   "rounded-md border border-black/15 px-2.5 py-1 text-sm hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/[0.04]";
@@ -116,6 +157,12 @@ export default function BoardViewPage() {
   // Selection: highlighted designators (uppercase) + a label for the header.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectionLabel, setSelectionLabel] = useState("");
+  // The BOM line whose detail card is shown (set when a single line is selected).
+  const [detailRow, setDetailRow] = useState<BomRow | null>(null);
+
+  // Build progress: which BOM lines are populated (persisted per board locally).
+  const [populated, setPopulated] = useState<Set<number>>(new Set());
+  const [hidePopulated, setHidePopulated] = useState(false);
 
   // BOM list controls.
   const [query, setQuery] = useState("");
@@ -137,13 +184,50 @@ export default function BoardViewPage() {
     setImgVersion((v) => v + 1);
   }, [id]);
 
+  // Load this board's saved populated set once on mount (client-only — read from
+  // localStorage after hydration to avoid an SSR/client mismatch).
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPopulated(loadPopulated(String(id)));
+  }, [id]);
+
+  // Toggle a line's populated state and persist.
+  const togglePopulated = useCallback(
+    (rowId: number) => {
+      setPopulated((prev) => {
+        const next = new Set(prev);
+        if (next.has(rowId)) next.delete(rowId);
+        else next.add(rowId);
+        savePopulated(String(id), next);
+        return next;
+      });
+    },
+    [id],
+  );
+
+  // Mark every (currently visible) line populated, or clear all.
+  const setManyPopulated = useCallback(
+    (rowIds: number[], on: boolean) => {
+      setPopulated((prev) => {
+        const next = new Set(prev);
+        for (const rid of rowIds) {
+          if (on) next.add(rid);
+          else next.delete(rid);
+        }
+        savePopulated(String(id), next);
+        return next;
+      });
+    },
+    [id],
+  );
+
   useEffect(() => {
     let active = true;
     void (async () => {
       try {
         const [boardList, bomRows, b] = await Promise.all([
           jget<{ id: number; name: string; revision: string }[]>("/api/boards"),
-          jget<BomRow[]>(`/api/boards/${id}/bom`),
+          jget<BomRow[]>(`/api/boards/${id}/bom?detail=1`),
           jget<Bundle>(`/api/boards/${id}/placements`),
         ]);
         if (!active) return;
@@ -227,10 +311,17 @@ export default function BoardViewPage() {
 
   const selectBomRow = useCallback(
     (row: BomRow) => {
+      setDetailRow(row);
       selectDesignators(splitDesignators(row.designators), row.partMpn || row.value || "part");
     },
     [selectDesignators],
   );
+
+  const clearSelection = useCallback(() => {
+    setSelected(new Set());
+    setSelectionLabel("");
+    setDetailRow(null);
+  }, []);
 
   // Click a placement dot -> select its whole BOM line (or just that part).
   const selectPlacement = useCallback(
@@ -255,6 +346,7 @@ export default function BoardViewPage() {
         return false;
       }
       setError("");
+      setDetailRow(rows.length === 1 ? rows[0] : null);
       selectDesignators(designators, mpn);
       return true;
     },
@@ -398,16 +490,39 @@ export default function BoardViewPage() {
     }
   }
 
+  // --- Build progress (qty-weighted across BOM lines) --------------------
+  const progress = useMemo(() => {
+    let totalParts = 0;
+    let doneParts = 0;
+    let doneLines = 0;
+    for (const r of bom) {
+      const n = countDesignators(r.designators) || r.qtyPerBoard || 0;
+      totalParts += n;
+      if (populated.has(r.id)) {
+        doneParts += n;
+        doneLines += 1;
+      }
+    }
+    return {
+      totalLines: bom.length,
+      doneLines,
+      totalParts,
+      doneParts,
+      pct: totalParts > 0 ? Math.round((doneParts / totalParts) * 100) : 0,
+    };
+  }, [bom, populated]);
+
   // --- BOM list (filter + sort) ------------------------------------------
   const filteredBom = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const rows = q
+    let rows = q
       ? bom.filter((r) =>
-          [r.partMpn ?? "", r.value, r.package, r.designators].some((f) =>
+          [r.partMpn ?? "", r.value, r.package, r.designators, r.spn ?? ""].some((f) =>
             f.toLowerCase().includes(q),
           ),
         )
       : bom;
+    if (hidePopulated) rows = rows.filter((r) => !populated.has(r.id));
     const sorted = [...rows].sort((a, b) => {
       if (sortKey === "qtyPerBoard") return (a.qtyPerBoard - b.qtyPerBoard) * sortDir;
       const av = sortKey === "side" ? sideLabel(a) : ((a[sortKey] ?? "") as string);
@@ -415,7 +530,7 @@ export default function BoardViewPage() {
       return av.localeCompare(bv, undefined, { numeric: true }) * sortDir;
     });
     return sorted;
-  }, [bom, query, sortKey, sortDir, sideLabel]);
+  }, [bom, query, sortKey, sortDir, sideLabel, hidePopulated, populated]);
 
   function toggleSort(key: typeof sortKey) {
     if (key === sortKey) setSortDir((d) => (d === 1 ? -1 : 1));
@@ -512,13 +627,7 @@ export default function BoardViewPage() {
               <p className="mb-2 text-sm">
                 <span className="text-black/50 dark:text-white/50">Selected: </span>
                 <span className="font-medium">{selectionLabel}</span>{" "}
-                <button
-                  className="text-blue-600 underline dark:text-blue-400"
-                  onClick={() => {
-                    setSelected(new Set());
-                    setSelectionLabel("");
-                  }}
-                >
+                <button className="text-blue-600 underline dark:text-blue-400" onClick={clearSelection}>
                   clear
                 </button>
               </p>
@@ -585,21 +694,71 @@ export default function BoardViewPage() {
 
           {/* BOM list */}
           <section className="min-w-0">
+            {/* Build progress */}
+            <ProgressBar progress={progress} />
+
+            {/* Selected component detail card */}
+            {detailRow && (
+              <ComponentCard
+                row={detailRow}
+                side={sideLabel(detailRow)}
+                count={countDesignators(detailRow.designators)}
+                populated={populated.has(detailRow.id)}
+                onTogglePopulated={() => togglePopulated(detailRow.id)}
+                onClose={clearSelection}
+              />
+            )}
+
+            {/* Filter */}
             <div className="mb-2 flex items-center gap-2">
               <input
                 className="w-full rounded-md border border-black/15 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-blue-500 dark:border-white/20"
-                placeholder="Filter by MPN, value, package, designator…"
+                placeholder="Filter by MPN, value, package, designator, DigiKey…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
               />
             </div>
-            <p className="mb-1 text-xs text-black/45 dark:text-white/45">
-              {filteredBom.length} of {bom.length} line(s)
-            </p>
+
+            {/* Count + bulk actions */}
+            <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-black/55 dark:text-white/55">
+              <span>
+                {filteredBom.length} of {bom.length} line(s)
+              </span>
+              <label className="flex cursor-pointer select-none items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5"
+                  checked={hidePopulated}
+                  onChange={(e) => setHidePopulated(e.target.checked)}
+                />
+                Hide populated
+              </label>
+              <button
+                className="text-blue-600 hover:underline disabled:opacity-40 dark:text-blue-400"
+                disabled={filteredBom.length === 0}
+                onClick={() => setManyPopulated(filteredBom.map((r) => r.id), true)}
+              >
+                Mark shown done
+              </button>
+              <button
+                className="text-blue-600 hover:underline disabled:opacity-40 dark:text-blue-400"
+                disabled={progress.doneLines === 0}
+                onClick={() => {
+                  if (window.confirm("Reset build progress for this board?"))
+                    setManyPopulated(bom.map((r) => r.id), false);
+                }}
+              >
+                Reset all
+              </button>
+            </div>
+
             <div className="max-h-[70vh] overflow-auto rounded-lg border border-black/10 dark:border-white/15">
               <table className="w-full text-left text-sm">
-                <thead className="sticky top-0 bg-[var(--background)] text-black/50 dark:text-white/50">
+                <thead className="sticky top-0 z-[1] bg-[var(--background)] text-black/50 dark:text-white/50">
                   <tr className="border-b border-black/10 dark:border-white/15">
+                    <th className="px-2 py-2 text-center font-medium" title="Populated">
+                      ✓
+                    </th>
                     {([
                       ["qtyPerBoard", "Qty"],
                       ["designators", "Designators"],
@@ -624,29 +783,52 @@ export default function BoardViewPage() {
                     const isSel =
                       selected.size > 0 &&
                       splitDesignators(row.designators).some((d) => selected.has(norm(d)));
+                    const done = populated.has(row.id);
+                    const dim = done ? "text-black/40 dark:text-white/40" : "";
                     return (
                       <tr
                         key={row.id}
                         onClick={() => selectBomRow(row)}
                         className={`cursor-pointer border-b border-black/5 dark:border-white/10 ${
-                          isSel ? "bg-blue-500/15" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                          isSel
+                            ? "bg-blue-500/15"
+                            : done
+                              ? "bg-green-500/[0.07]"
+                              : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                         }`}
                       >
-                        <td className="px-2 py-1.5 text-right tabular-nums">{row.qtyPerBoard}</td>
-                        <td className="px-2 py-1.5 text-xs text-black/60 dark:text-white/60">
+                        <td className="px-2 py-1.5 text-center" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 cursor-pointer align-middle accent-green-600"
+                            checked={done}
+                            onChange={() => togglePopulated(row.id)}
+                            title={done ? "Mark not populated" : "Mark populated"}
+                          />
+                        </td>
+                        <td className={`px-2 py-1.5 text-right tabular-nums ${dim}`}>{row.qtyPerBoard}</td>
+                        <td
+                          className={`px-2 py-1.5 text-xs ${
+                            done ? "text-black/40 line-through dark:text-white/40" : "text-black/60 dark:text-white/60"
+                          }`}
+                        >
                           {row.designators}
                         </td>
-                        <td className="px-2 py-1.5 whitespace-nowrap">{sideLabel(row)}</td>
-                        <td className="px-2 py-1.5 font-mono">{row.partMpn || "—"}</td>
-                        <td className="px-2 py-1.5">{row.value}</td>
-                        <td className="px-2 py-1.5">{row.package}</td>
+                        <td className={`px-2 py-1.5 whitespace-nowrap ${dim}`}>{sideLabel(row)}</td>
+                        <td className={`px-2 py-1.5 font-mono ${dim}`}>{row.partMpn || "—"}</td>
+                        <td className={`px-2 py-1.5 ${dim}`}>{row.value}</td>
+                        <td className={`px-2 py-1.5 ${dim}`}>{row.package}</td>
                       </tr>
                     );
                   })}
                   {filteredBom.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-2 py-6 text-center text-black/40 dark:text-white/40">
-                        {bom.length === 0 ? "No BOM imported for this board." : "No matches."}
+                      <td colSpan={7} className="px-2 py-6 text-center text-black/40 dark:text-white/40">
+                        {bom.length === 0
+                          ? "No BOM imported for this board."
+                          : hidePopulated && progress.doneLines === progress.totalLines
+                            ? "All components populated 🎉"
+                            : "No matches."}
                       </td>
                     </tr>
                   )}
@@ -673,6 +855,127 @@ export default function BoardViewPage() {
         />
       )}
     </>
+  );
+}
+
+// ===========================================================================
+// Build progress bar
+// ===========================================================================
+function ProgressBar({
+  progress,
+}: {
+  progress: { doneParts: number; totalParts: number; doneLines: number; totalLines: number; pct: number };
+}) {
+  const done = progress.totalParts > 0 && progress.doneParts === progress.totalParts;
+  return (
+    <div className="mb-3">
+      <div className="mb-1 flex items-baseline justify-between text-xs">
+        <span className="font-medium">
+          {done ? "Build complete 🎉" : "Build progress"}
+        </span>
+        <span className="tabular-nums text-black/55 dark:text-white/55">
+          {progress.doneParts}/{progress.totalParts} parts · {progress.doneLines}/{progress.totalLines} lines ·{" "}
+          {progress.pct}%
+        </span>
+      </div>
+      <div className="h-2.5 w-full overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
+        <div
+          className={`h-full rounded-full transition-[width] duration-300 ${done ? "bg-green-500" : "bg-blue-500"}`}
+          style={{ width: `${progress.pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// Selected component detail card
+// ===========================================================================
+function ComponentCard({
+  row,
+  side,
+  count,
+  populated,
+  onTogglePopulated,
+  onClose,
+}: {
+  row: BomRow;
+  side: string;
+  count: number;
+  populated: boolean;
+  onTogglePopulated: () => void;
+  onClose: () => void;
+}) {
+  const url = row.supplier && row.spn ? supplierUrl(row.supplier, row.spn) : null;
+  const cost = row.unitCost != null && row.unitCost !== "" ? Number(row.unitCost) : null;
+  const field = (label: string, value: ReactNode) =>
+    value || value === 0 ? (
+      <div className="min-w-0">
+        <dt className="text-[10px] uppercase tracking-wide text-black/40 dark:text-white/40">{label}</dt>
+        <dd className="truncate text-sm">{value}</dd>
+      </div>
+    ) : null;
+
+  return (
+    <div
+      className={`mb-3 rounded-lg border p-3 ${
+        populated
+          ? "border-green-500/30 bg-green-500/[0.06]"
+          : "border-blue-500/30 bg-blue-500/[0.06]"
+      }`}
+    >
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate font-mono text-sm font-medium">{row.partMpn || row.value || "Component"}</p>
+          {row.manufacturer && (
+            <p className="truncate text-xs text-black/50 dark:text-white/50">{row.manufacturer}</p>
+          )}
+        </div>
+        <button
+          className="shrink-0 text-black/40 hover:text-black dark:text-white/40 dark:hover:text-white"
+          onClick={onClose}
+          title="Close"
+        >
+          ✕
+        </button>
+      </div>
+
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
+        {field("Designators", <span className="break-words">{row.designators || "—"}</span>)}
+        {field("Side", side)}
+        {field("Qty / board", count || row.qtyPerBoard)}
+        {field("Value", row.value)}
+        {field("Package", row.package)}
+        {field("On hand", row.onHand)}
+        {field(
+          row.supplier ? `${row.supplier} #` : "Supplier #",
+          url ? (
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-600 hover:underline dark:text-blue-400"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {row.spn}
+            </a>
+          ) : (
+            row.spn
+          ),
+        )}
+        {field("Unit cost", cost != null ? `$${cost.toFixed(4)}` : null)}
+      </dl>
+
+      <label className="mt-3 flex cursor-pointer select-none items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          className="h-4 w-4 cursor-pointer accent-green-600"
+          checked={populated}
+          onChange={onTogglePopulated}
+        />
+        Populated on this board
+      </label>
+    </div>
   );
 }
 

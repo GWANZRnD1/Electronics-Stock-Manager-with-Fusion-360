@@ -188,6 +188,44 @@ export function getBoardBom(boardId: number) {
   return getDb().select().from(bomLines).where(eq(bomLines.boardId, boardId)).orderBy(bomLines.id);
 }
 
+/**
+ * BOM lines enriched with catalog details (manufacturer, supplier + supplier
+ * part number, unit cost) and current on-hand stock, matched by MPN. Powers the
+ * Assembly view's component detail card. Lines without a catalog match (blank or
+ * unknown MPN) simply carry empty catalog fields and zero stock.
+ */
+export async function getBoardBomDetailed(boardId: number) {
+  const lines = await getBoardBom(boardId);
+  const mpns = [...new Set(lines.map((l) => l.partMpn).filter((m): m is string => Boolean(m)))];
+
+  const catRows = mpns.length
+    ? await getDb()
+        .select({
+          mpn: parts.mpn,
+          manufacturer: parts.manufacturer,
+          supplier: parts.supplier,
+          spn: parts.spn,
+          unitCost: parts.unitCost,
+        })
+        .from(parts)
+        .where(inArray(parts.mpn, mpns))
+    : [];
+  const cat = new Map(catRows.map((r) => [r.mpn, r]));
+  const stock = await stockByMpns(mpns);
+
+  return lines.map((l) => {
+    const c = l.partMpn ? cat.get(l.partMpn) : undefined;
+    return {
+      ...l,
+      manufacturer: c?.manufacturer ?? "",
+      supplier: c?.supplier ?? "",
+      spn: c?.spn ?? "",
+      unitCost: c?.unitCost ?? null,
+      onHand: l.partMpn ? stock[l.partMpn] ?? 0 : 0,
+    };
+  });
+}
+
 export interface BomLineInput {
   partMpn?: string | null;
   value?: string;
