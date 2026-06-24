@@ -66,21 +66,28 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     { side: "bottom", rendered: render.bottom },
   ];
   const done: BoardSide[] = [];
-  for (const { side, rendered } of sides) {
-    if (!rendered) continue;
-    const path = `boards/${boardId}/${side}.svg`;
-    await uploadObject(path, new TextEncoder().encode(rendered.svg), "image/svg+xml");
-    await upsertBoardImage({
-      boardId,
-      side,
-      storagePath: path,
-      mime: "image/svg+xml",
-      width: rendered.widthPx,
-      height: rendered.heightPx,
-    });
-    // upsert clears any prior calibration; set the render-derived alignment.
-    await setCalibration(boardId, side, JSON.stringify(bboxToCalibration(side, rendered.mmBbox)));
-    done.push(side);
+  try {
+    for (const { side, rendered } of sides) {
+      if (!rendered) continue;
+      const path = `boards/${boardId}/${side}.svg`;
+      await uploadObject(path, new TextEncoder().encode(rendered.svg), "image/svg+xml");
+      await upsertBoardImage({
+        boardId,
+        side,
+        storagePath: path,
+        mime: "image/svg+xml",
+        width: rendered.widthPx,
+        height: rendered.heightPx,
+      });
+      // upsert clears any prior calibration; set the render-derived alignment.
+      await setCalibration(boardId, side, JSON.stringify(bboxToCalibration(side, rendered.mmBbox)));
+      done.push(side);
+    }
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "failed to store the rendered images" },
+      { status: 502 },
+    );
   }
 
   if (done.length === 0) {

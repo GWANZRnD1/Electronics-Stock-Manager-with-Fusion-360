@@ -60,21 +60,34 @@ function authHeaders(): Record<string, string> {
   return { authorization: `Bearer ${key}`, apikey: key };
 }
 
-/** Create the bucket if it doesn't exist (idempotent). Private by default. */
+// Private bucket; allow the raster image types plus SVG (Gerber renders are SVG).
+const BUCKET_CONFIG = {
+  public: false,
+  file_size_limit: 25 * 1024 * 1024,
+  allowed_mime_types: ["image/png", "image/jpeg", "image/webp", "image/svg+xml"],
+};
+
+/**
+ * Create the bucket if missing, else update its config (idempotent). The update
+ * path matters: it adds image/svg+xml to buckets created before SVG support, so
+ * Gerber-render uploads stop 415-ing without manual dashboard surgery.
+ */
 export async function ensureBucket(): Promise<void> {
   const base = `${projectUrl()}/storage/v1`;
   const head = await fetch(`${base}/bucket/${BOARD_IMAGES_BUCKET}`, { headers: authHeaders() });
-  if (head.ok) return;
+  if (head.ok) {
+    const upd = await fetch(`${base}/bucket/${BOARD_IMAGES_BUCKET}`, {
+      method: "PUT",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      body: JSON.stringify(BUCKET_CONFIG),
+    });
+    if (!upd.ok) throw new Error(`failed to update storage bucket (${upd.status}): ${await upd.text()}`);
+    return;
+  }
   const res = await fetch(`${base}/bucket`, {
     method: "POST",
     headers: { ...authHeaders(), "content-type": "application/json" },
-    body: JSON.stringify({
-      id: BOARD_IMAGES_BUCKET,
-      name: BOARD_IMAGES_BUCKET,
-      public: false,
-      file_size_limit: 10 * 1024 * 1024, // 10 MB per image is plenty for a PCB render
-      allowed_mime_types: ["image/png", "image/jpeg", "image/webp"],
-    }),
+    body: JSON.stringify({ id: BOARD_IMAGES_BUCKET, name: BOARD_IMAGES_BUCKET, ...BUCKET_CONFIG }),
   });
   if (!res.ok && res.status !== 409) {
     throw new Error(`failed to create storage bucket (${res.status}): ${await res.text()}`);
