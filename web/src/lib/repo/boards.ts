@@ -2,7 +2,16 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { getDb } from "@/lib/db";
-import { boards, bomLines, buildConsumptions, builds, parts, stockItems } from "@/lib/db/schema";
+import {
+  boardImages,
+  boards,
+  bomLines,
+  buildConsumptions,
+  builds,
+  componentPlacements,
+  parts,
+  stockItems,
+} from "@/lib/db/schema";
 import { type BomLine, computeShortage, type ShortageReport } from "@/lib/domain/shortage";
 
 export function listBoards() {
@@ -109,8 +118,70 @@ export async function deleteBoard(id: number) {
     }
     await tx.delete(builds).where(eq(builds.boardId, id));
     await tx.delete(bomLines).where(eq(bomLines.boardId, id));
+    await tx.delete(componentPlacements).where(eq(componentPlacements.boardId, id));
+    await tx.delete(boardImages).where(eq(boardImages.boardId, id));
     await tx.delete(boards).where(eq(boards.id, id));
   });
+}
+
+export interface PlacementInput {
+  designator?: string;
+  x: number;
+  y: number;
+  angle?: number;
+  side?: "top" | "bottom";
+  package?: string;
+  mpn?: string | null;
+}
+
+export interface Outline {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+/** Replace all placements for a board and store the outline bbox on the board. */
+export async function replacePlacements(
+  boardId: number,
+  outline: Outline,
+  placements: PlacementInput[],
+) {
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    await tx
+      .update(boards)
+      .set({
+        outlineMinX: String(outline.minX),
+        outlineMinY: String(outline.minY),
+        outlineMaxX: String(outline.maxX),
+        outlineMaxY: String(outline.maxY),
+      })
+      .where(eq(boards.id, boardId));
+    await tx.delete(componentPlacements).where(eq(componentPlacements.boardId, boardId));
+    if (placements.length > 0) {
+      await tx.insert(componentPlacements).values(
+        placements.map((p) => ({
+          boardId,
+          designator: p.designator ?? "",
+          x: String(p.x),
+          y: String(p.y),
+          angle: String(p.angle ?? 0),
+          side: p.side ?? "top",
+          package: p.package ?? "",
+          mpn: p.mpn?.trim() || null,
+        })),
+      );
+    }
+  });
+}
+
+export function getPlacements(boardId: number) {
+  return getDb()
+    .select()
+    .from(componentPlacements)
+    .where(eq(componentPlacements.boardId, boardId))
+    .orderBy(componentPlacements.id);
 }
 
 export function getBoardBom(boardId: number) {

@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Nav } from "@/components/Nav";
 import { jget, jpost, jput } from "@/lib/client";
@@ -82,6 +83,8 @@ const btnClass =
 export default function BoardDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const placementsRef = useRef<HTMLInputElement>(null);
+  const [placementsMsg, setPlacementsMsg] = useState("");
   const [boardName, setBoardName] = useState("");
   const [boardRev, setBoardRev] = useState("");
   const [siblings, setSiblings] = useState<{ id: number; revision: string }[]>([]);
@@ -146,6 +149,31 @@ export default function BoardDetailPage() {
       setReport(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importPlacements(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    setPlacementsMsg("");
+    try {
+      const payload = JSON.parse(await file.text());
+      const r = await jpost<{ placements: number }>(`/api/boards/${id}/placements`, payload);
+      setPlacementsMsg(`Imported ${r.placements} placement(s). Open the Assembly view to use them.`);
+    } catch (e) {
+      if (e instanceof Error && e.message === "locked") return;
+      setError(
+        e instanceof SyntaxError
+          ? "That file isn't valid JSON — pick the .json from extract-placements.ulp."
+          : e instanceof Error
+            ? e.message
+            : "Import failed.",
+      );
     } finally {
       setBusy(false);
     }
@@ -400,6 +428,12 @@ export default function BoardDetailPage() {
               <span className="text-base font-normal text-black/50 dark:text-white/50">{boardRev}</span>
             )
           )}
+          <Link
+            href={`/boards/${id}/view`}
+            className="ml-auto rounded-md border border-black/15 px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:border-white/20 dark:hover:bg-white/[0.04]"
+          >
+            Assembly view →
+          </Link>
         </div>
         <p className="mb-6 text-sm text-black/60 dark:text-white/60">
           Paste the BOM, then check how many you can build and what to buy.
@@ -423,12 +457,37 @@ export default function BoardDetailPage() {
             value={bomText}
             onChange={(e) => setBomText(e.target.value)}
           />
-          <div className="mt-3 flex items-center gap-3">
+          <div className="mt-3 flex flex-wrap items-center gap-3">
             <button className={btnClass} onClick={saveBom} disabled={busy}>
               {busy ? "Saving…" : "Save BOM"}
             </button>
+            <button
+              type="button"
+              className="rounded-md border border-black/15 px-4 py-2 font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/[0.04]"
+              onClick={() => placementsRef.current?.click()}
+              disabled={busy}
+            >
+              Import placements (.json)
+            </button>
+            <input
+              ref={placementsRef}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={importPlacements}
+            />
             {savedMsg && <span className="text-sm text-black/70 dark:text-white/70">{savedMsg}</span>}
+            {placementsMsg && (
+              <span className="text-sm text-black/70 dark:text-white/70">{placementsMsg}</span>
+            )}
           </div>
+          <p className="mt-2 text-xs text-black/45 dark:text-white/45">
+            Placements come from <code>extract-placements.ulp</code> (Board editor) and power the{" "}
+            <Link href={`/boards/${id}/view`} className="text-blue-600 underline dark:text-blue-400">
+              Assembly view
+            </Link>
+            .
+          </p>
         </section>
 
         <section className="rounded-xl border border-black/10 p-5 dark:border-white/15">

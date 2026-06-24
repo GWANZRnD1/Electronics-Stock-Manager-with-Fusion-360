@@ -153,6 +153,45 @@ export const fusionImportSchema = z.object({
   lines: z.array(bomLineInputSchema).max(5_000),
 });
 
+const sideSchema = z.enum(["top", "bottom"]);
+
+const placementSchema = z.object({
+  designator: z.string().trim().max(64).default(""),
+  x: z.number(),
+  y: z.number(),
+  angle: z.number().optional().default(0),
+  side: sideSchema.optional().default("top"),
+  package: z.string().trim().max(64).optional().default(""),
+  mpn: z.string().trim().max(128).optional().nullable(),
+});
+
+export const placementsImportSchema = z.object({
+  board: z.object({
+    name: z.string().trim().min(1).max(128),
+    fusionDocId: z.string().trim().max(256).optional().nullable(),
+    revision: z.string().trim().max(64).optional(),
+  }),
+  outline: z.object({
+    minX: z.number(),
+    minY: z.number(),
+    maxX: z.number(),
+    maxY: z.number(),
+  }),
+  placements: z.array(placementSchema).max(20_000),
+});
+
+// A single fractional/mm reference point for manual image calibration.
+const calibrationPointSchema = z.object({
+  frac: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
+  mm: z.object({ x: z.number(), y: z.number() }),
+});
+
+export const boardImageCalibrationSchema = z.object({
+  side: sideSchema,
+  // null clears the override (back to auto-crop alignment); else two points.
+  calibration: z.tuple([calibrationPointSchema, calibrationPointSchema]).nullable(),
+});
+
 export const digikeyBatchSchema = z.object({
   items: z
     .array(

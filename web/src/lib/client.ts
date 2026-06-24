@@ -46,3 +46,9 @@ export async function jpostText<T>(url: string, text: string): Promise<T> {
     await fetch(url, { method: "POST", headers: { "content-type": "text/csv" }, body: text }),
   );
 }
+
+/** POST multipart form data (e.g. a board image file). No content-type header —
+ * the browser sets the multipart boundary itself. */
+export async function jupload<T>(url: string, form: FormData): Promise<T> {
+  return handle<T>(await fetch(url, { method: "POST", body: form }));
+}

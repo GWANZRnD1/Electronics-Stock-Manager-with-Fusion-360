@@ -110,9 +110,60 @@ export const boards = pgTable(
     revision: text("revision").notNull().default(""),
     // Archived boards collapse out of the main list (kept, not deleted).
     archived: boolean("archived").notNull().default(false),
+    // Board outline extents (mm) from the placements export — the coordinate box
+    // used to map component (x,y) onto the board image for highlighting. Null
+    // until placements are imported.
+    outlineMinX: numeric("outline_min_x", { precision: 12, scale: 4 }),
+    outlineMinY: numeric("outline_min_y", { precision: 12, scale: 4 }),
+    outlineMaxX: numeric("outline_max_x", { precision: 12, scale: 4 }),
+    outlineMaxY: numeric("outline_max_y", { precision: 12, scale: 4 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("boards_fusion_doc_idx").on(t.fusionDocId)],
+);
+
+// One row per placed component on a board (from extract-placements.ulp). Drives
+// the interactive board view: designator + (x,y) mm + side let the app drop a
+// highlight marker on the board image. Linked to the BOM by designator/MPN.
+export const componentPlacements = pgTable(
+  "component_placements",
+  {
+    id: serial("id").primaryKey(),
+    boardId: integer("board_id")
+      .notNull()
+      .references(() => boards.id),
+    designator: text("designator").notNull().default(""), // refdes, e.g. "R1", "U3"
+    x: numeric("x", { precision: 12, scale: 4 }).notNull(), // mm, board coordinates
+    y: numeric("y", { precision: 12, scale: 4 }).notNull(),
+    angle: numeric("angle", { precision: 7, scale: 2 }).notNull().default("0"),
+    side: text("side").notNull().default("top"), // "top" | "bottom"
+    package: text("package").notNull().default(""),
+    mpn: text("mpn"), // manufacturer part number if the element carried one
+  },
+  (t) => [index("placements_board_idx").on(t.boardId)],
+);
+
+// Uploaded board pictures (one per side). The bytes live in a Supabase Storage
+// bucket; this table holds the object path + pixel dimensions (needed to map mm
+// -> pixels) and an optional manual calibration override (two reference points).
+export const boardImages = pgTable(
+  "board_images",
+  {
+    id: serial("id").primaryKey(),
+    boardId: integer("board_id")
+      .notNull()
+      .references(() => boards.id),
+    side: text("side").notNull(), // "top" | "bottom"
+    storagePath: text("storage_path").notNull(), // object key within the bucket
+    mime: text("mime").notNull().default("image/png"),
+    width: integer("width").notNull().default(0),
+    height: integer("height").notNull().default(0),
+    // Optional 2-point calibration JSON to override the auto-crop alignment when
+    // an export has margins: [{frac:{x,y}, mm:{x,y}}, {frac:{x,y}, mm:{x,y}}].
+    calibration: text("calibration"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("board_images_board_side_uq").on(t.boardId, t.side)],
 );
 
 export const bomLines = pgTable(

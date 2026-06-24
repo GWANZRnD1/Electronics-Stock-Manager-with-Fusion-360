@@ -1,0 +1,172 @@
+#usage "en: <b>Extract this board's component placements</b> (designator, X/Y, "
+       "rotation, side, package, MPN) plus the board outline bounding box. Run from "
+       "the <b>Board</b> editor. Writes a <b>.json</b> ready to POST to the Stock "
+       "Manager (<i>/api/fusion/placements</i> or Boards → Import placements). "
+       "Feeds the app's interactive board view (click a part → highlight it on the "
+       "board picture). Read-only; it changes nothing in the design.\n"
+
+// ---------------------------------------------------------------------------
+// Why a separate ULP from extract-bom.ulp:
+//   The BOM is best read from the *schematic* (richest attributes). Component
+//   XY positions only exist on the *board*. This ULP reads the board and emits
+//   one record per placed element, plus the board outline extents (mm) so the
+//   app can map mm -> image pixels for highlighting. The app links this to the
+//   board the BOM was imported into by matching the board name (and revision).
+// ---------------------------------------------------------------------------
+
+// JSON-escape a string value (quotes, backslash, control chars).
+string jsonEscape(string s) {
+  string out = "";
+  int n = strlen(s);
+  for (int i = 0; i < n; i++) {
+    string c = strsub(s, i, 1);
+    if      (c == "\"") out += "\\\"";
+    else if (c == "\\") out += "\\\\";
+    else if (c == "\n") out += "\\n";
+    else if (c == "\r") out += "\\r";
+    else if (c == "\t") out += "\\t";
+    else out += c;
+  }
+  return out;
+}
+
+// Index of the last path separator ('/' or '\'), or -1 if none.
+int lastSep(string s) {
+  int a = strrchr(s, '/');
+  int b = strrchr(s, '\\');
+  return a > b ? a : b;
+}
+
+// File name without its directory or extension (used as the board name).
+string baseName(string path) {
+  string f = strsub(path, lastSep(path) + 1);
+  int dot = strrchr(f, '.');
+  if (dot > 0) f = strsub(f, 0, dot);
+  return f;
+}
+
+// ---------------------------------------------------------------------------
+// MPN extraction (same attribute names as extract-bom.ulp).
+// ---------------------------------------------------------------------------
+int isMpnAttr(string nameUpper) {
+  return (nameUpper == "MPN" ||
+          nameUpper == "MANUFACTURER_PART_NUMBER" ||
+          nameUpper == "MANUFACTURERPARTNUMBER" ||
+          nameUpper == "MFR_PN" ||
+          nameUpper == "MF_PARTNUMBER" ||
+          nameUpper == "PART_NUMBER");
+}
+
+string mpnOfElement(UL_ELEMENT E) {
+  string mpn = "";
+  E.attributes(A) {
+    if (A.value != "" && isMpnAttr(strupr(A.name))) mpn = A.value;
+  }
+  return mpn;
+}
+
+// Title-block frames slip past the package check; drop them explicitly.
+int isFrame(string nm, string pkgName) {
+  return (strsub(strupr(nm), 0, 5) == "FRAME" ||
+          strupr(pkgName) == "CREATIVE_COMMONS");
+}
+
+// ---------------------------------------------------------------------------
+// Read the active board
+// ---------------------------------------------------------------------------
+if (!board) {
+  dlgMessageBox("Open this from a Board editor — it reads the active board's component positions.");
+  exit(0);
+}
+
+string boardName = "design";
+int    total = 0;
+int    skipped = 0;
+
+// Outline bounding box, accumulated from Dimension-layer (20) wires in internal
+// units. Fall back to the board's overall area if no outline wires are found.
+int haveBox = 0;
+int bxMin = 0, byMin = 0, bxMax = 0, byMax = 0;
+
+void grow(int x, int y) {
+  if (!haveBox) { bxMin = x; bxMax = x; byMin = y; byMax = y; haveBox = 1; return; }
+  if (x < bxMin) bxMin = x;
+  if (x > bxMax) bxMax = x;
+  if (y < byMin) byMin = y;
+  if (y > byMax) byMax = y;
+}
+
+// Buffer the placement JSON rows so we can write the outline first.
+string rows = "";
+
+board(B) {
+  boardName = baseName(B.name);
+
+  // Board outline = wires on the Dimension layer (20).
+  B.wires(W) {
+    if (W.layer == 20) { grow(W.x1, W.y1); grow(W.x2, W.y2); }
+  }
+
+  B.elements(E) {
+    // Skip do-not-populate and pure symbols with no physical package.
+    if (!E.populate) { skipped++; continue; }
+    if (!E.package)  { skipped++; continue; }
+    if (isFrame(E.name, E.package.name)) { skipped++; continue; }
+
+    string side = E.mirror ? "bottom" : "top";
+    string mpn  = mpnOfElement(E);
+
+    string row;
+    sprintf(row,
+      "    {\"designator\": \"%s\", \"x\": %f, \"y\": %f, \"angle\": %f, "
+      "\"side\": \"%s\", \"package\": \"%s\", \"mpn\": %s}",
+      jsonEscape(E.name), u2mm(E.x), u2mm(E.y), E.angle,
+      side, jsonEscape(E.package.name),
+      mpn != "" ? "\"" + jsonEscape(mpn) + "\"" : "null");
+
+    if (total > 0) rows += ",\n";
+    rows += row;
+    total++;
+  }
+}
+
+if (total == 0) {
+  dlgMessageBox("No placed, populated components were found on this board.");
+  exit(0);
+}
+
+// If no outline wires were found, fall back to the elements' own extents so the
+// app still has a usable mapping box (it can be re-calibrated in the app).
+if (!haveBox) {
+  board(B) { B.elements(E) { grow(E.x, E.y); } }
+}
+
+// ---------------------------------------------------------------------------
+// Write the JSON
+// ---------------------------------------------------------------------------
+string jsonFile = dlgFileSave("Save placements (JSON for the Stock Manager API)",
+                              boardName + "-placements.json",
+                              "JSON files (*.json);;All files (*)");
+if (jsonFile == "") exit(0);
+
+output(jsonFile, "wt") {
+  printf("{\n");
+  printf("  \"board\": { \"name\": \"%s\" },\n", jsonEscape(boardName));
+  printf("  \"outline\": { \"minX\": %f, \"minY\": %f, \"maxX\": %f, \"maxY\": %f },\n",
+         u2mm(bxMin), u2mm(byMin), u2mm(bxMax), u2mm(byMax));
+  printf("  \"placements\": [\n");
+  printf("%s\n", rows);
+  printf("  ]\n}\n");
+}
+
+string msg, tmp;
+sprintf(msg, "Placements extracted from \"%s\".\n\n", boardName);
+sprintf(tmp, "Placed components: %d\nSkipped (DNP / no package / frames): %d\n", total, skipped);
+msg += tmp;
+sprintf(tmp, "Outline (mm): X %.2f..%.2f, Y %.2f..%.2f\n",
+        u2mm(bxMin), u2mm(bxMax), u2mm(byMin), u2mm(byMax));
+msg += tmp;
+msg += "\nSaved:\n  " + jsonFile +
+       "\n\nNext: in the app open the matching board's Assembly view and "
+       "Import placements (.json), or POST it to /api/fusion/placements.";
+dlgMessageBox(msg);
