@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { getBoard } from "@/lib/repo/boards";
+import { getBoard, replacePlacements } from "@/lib/repo/boards";
 import { type BoardSide, setCalibration, upsertBoardImage } from "@/lib/repo/boardImages";
-import { type MmBbox, renderGerberZip } from "@/lib/gerber/render";
+import { parsePickAndPlace } from "@/lib/gerber/placements";
+import { type MmBbox, renderGerber, unzipArchive } from "@/lib/gerber/render";
 import { storageConfigured, uploadObject } from "@/lib/storage/supabase";
 
 export const runtime = "nodejs";
@@ -51,9 +52,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: "zip is larger than 25 MB" }, { status: 400 });
   }
 
+  let files: Record<string, Uint8Array>;
   let render;
   try {
-    render = await renderGerberZip(new Uint8Array(await file.arrayBuffer()));
+    files = unzipArchive(new Uint8Array(await file.arrayBuffer()));
+    render = await renderGerber(files);
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "could not render the Gerbers" },
@@ -96,5 +99,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       { status: 400 },
     );
   }
-  return NextResponse.json({ ok: true, sides: done, layers: render.layerCount });
+
+  // If the zip also carried a pick-and-place / centroid file, import placements
+  // (same board coordinate space as the render) so highlighting works too.
+  let placements = 0;
+  const pnp = parsePickAndPlace(files);
+  const bbox = render.top?.mmBbox ?? render.bottom?.mmBbox;
+  if (pnp.length && bbox) {
+    await replacePlacements(boardId, bbox, pnp);
+    placements = pnp.length;
+  }
+
+  return NextResponse.json({ ok: true, sides: done, layers: render.layerCount, placements });
 }

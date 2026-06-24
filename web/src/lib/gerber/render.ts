@@ -13,6 +13,8 @@
 import { strFromU8, unzipSync } from "fflate";
 import pcbStackup from "pcb-stackup";
 
+import { looksLikePlacementFile } from "./placements";
+
 export interface MmBbox {
   minX: number;
   minY: number;
@@ -59,23 +61,28 @@ function toSide(side: StackupSide): RenderedSide | undefined {
   };
 }
 
-/** Unzip a Gerber archive and render both sides. Throws on an unreadable zip. */
-export async function renderGerberZip(buf: Uint8Array): Promise<GerberRender> {
-  let files: Record<string, Uint8Array>;
+/** Unzip an archive to a { name: bytes } map. Throws on an unreadable zip. */
+export function unzipArchive(buf: Uint8Array): Record<string, Uint8Array> {
   try {
-    files = unzipSync(buf);
+    return unzipSync(buf);
   } catch {
     throw new Error("could not read the zip — upload a .zip of Gerber + drill files");
   }
+}
 
+/** Render both board sides from an unzipped file map (ignores placement files). */
+export async function renderGerber(files: Record<string, Uint8Array>): Promise<GerberRender> {
   const layers = Object.entries(files)
-    .filter(([name, data]) => !name.endsWith("/") && data.length > 0)
+    .filter(
+      ([name, data]) =>
+        !name.endsWith("/") && data.length > 0 && !looksLikePlacementFile(name) && !/\.(json|md|pdf)$/i.test(name),
+    )
     .map(([name, data]) => ({
       filename: name.split("/").pop() ?? name, // whats-that-gerber keys on the basename
       gerber: strFromU8(data),
     }));
 
-  if (layers.length === 0) throw new Error("the zip contained no files");
+  if (layers.length === 0) throw new Error("no Gerber layers found in the zip");
 
   const stackup = (await pcbStackup(layers)) as unknown as {
     top: StackupSide;
@@ -87,4 +94,9 @@ export async function renderGerberZip(buf: Uint8Array): Promise<GerberRender> {
     bottom: toSide(stackup.bottom),
     layerCount: layers.length,
   };
+}
+
+/** Convenience: unzip + render in one call. */
+export async function renderGerberZip(buf: Uint8Array): Promise<GerberRender> {
+  return renderGerber(unzipArchive(buf));
 }

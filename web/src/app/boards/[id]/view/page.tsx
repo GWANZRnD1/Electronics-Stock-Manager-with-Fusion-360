@@ -106,6 +106,7 @@ export default function BoardViewPage() {
   const [bundle, setBundle] = useState<Bundle>({ outline: null, placements: [], images: [] });
   const [side, setSide] = useState<Side>("top");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
 
   // Selection: highlighted designators (uppercase) + a label for the header.
@@ -255,12 +256,22 @@ export default function BoardViewPage() {
   async function uploadGerber(file: File) {
     setBusy(true);
     setError("");
+    setInfo("");
     try {
       const form = new FormData();
       form.set("file", file);
-      const r = await jupload<{ sides: Side[] }>(`/api/boards/${id}/image/gerber`, form);
+      const r = await jupload<{ sides: Side[]; placements: number }>(
+        `/api/boards/${id}/image/gerber`,
+        form,
+      );
       await reloadBundle();
       if (r.sides.length) setSide(r.sides.includes(side) ? side : r.sides[0]);
+      setInfo(
+        `Rendered ${r.sides.join(" + ")}.` +
+          (r.placements
+            ? ` Imported ${r.placements} placements from the pick-and-place file.`
+            : " No pick-and-place file in the zip — import placements with extract-placements.ulp to enable highlighting."),
+      );
     } catch (e) {
       if (e instanceof Error && e.message !== "locked") setError(e.message);
     } finally {
@@ -388,6 +399,11 @@ export default function BoardViewPage() {
         {error && (
           <p className="mb-4 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
             {error}
+          </p>
+        )}
+        {info && (
+          <p className="mb-4 rounded-md bg-green-500/10 px-3 py-2 text-sm text-green-700 dark:text-green-400">
+            {info}
           </p>
         )}
 
