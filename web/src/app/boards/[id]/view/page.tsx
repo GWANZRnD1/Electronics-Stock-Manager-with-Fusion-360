@@ -108,6 +108,10 @@ export default function BoardViewPage() {
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
+  // Bumped on every bundle reload so the board <img> URL changes after an
+  // upload/calibration/delete and the browser refetches the new bytes
+  // (the GET is cache-control: max-age=60 on a fixed URL otherwise).
+  const [imgVersion, setImgVersion] = useState(0);
 
   // Selection: highlighted designators (uppercase) + a label for the header.
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -130,6 +134,7 @@ export default function BoardViewPage() {
   const reloadBundle = useCallback(async () => {
     const b = await jget<Bundle>(`/api/boards/${id}/placements`);
     setBundle(b);
+    setImgVersion((v) => v + 1);
   }, [id]);
 
   useEffect(() => {
@@ -522,6 +527,7 @@ export default function BoardViewPage() {
               key={side}
               boardId={Number(id)}
               side={side}
+              imgVersion={imgVersion}
               hasImage={Boolean(image)}
               mapper={mapper}
               placements={placementsThisSide}
@@ -713,6 +719,7 @@ const PlacementDots = memo(function PlacementDots({
 function BoardCanvas({
   boardId,
   side,
+  imgVersion,
   hasImage,
   mapper,
   placements,
@@ -723,6 +730,7 @@ function BoardCanvas({
 }: {
   boardId: number;
   side: Side;
+  imgVersion: number;
   hasImage: boolean;
   mapper: ((x: number, y: number) => { fx: number; fy: number }) | null;
   placements: Placement[];
@@ -870,7 +878,7 @@ function BoardCanvas({
             {hasImage ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={`/api/boards/${boardId}/image?side=${side}`}
+                src={`/api/boards/${boardId}/image?side=${side}&v=${imgVersion}`}
                 alt={`${side} of board`}
                 draggable={false}
                 onLoad={() => {
