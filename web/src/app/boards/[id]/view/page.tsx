@@ -296,7 +296,14 @@ export default function BoardViewPage() {
         renders: { side: Side; svg: string; mmBbox: Outline }[];
         placements: number;
         ignored?: string[];
+        classification?: { file: string; type: string | null; side: string | null; rendered: boolean }[];
       }>(`/api/boards/${id}/image/gerber`, form);
+
+      // Diagnostic: which file became which layer (and what got skipped).
+      if (r.classification) {
+        // eslint-disable-next-line no-console
+        console.table(r.classification);
+      }
 
       for (const ren of r.renders) {
         const ras = await rasterizeSvg(ren.svg);

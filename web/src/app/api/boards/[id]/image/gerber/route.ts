@@ -70,6 +70,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     ok: true,
     layers: render.layerCount,
     ignored: render.ignored,
+    classification: render.classification,
     placements,
     renders,
   });

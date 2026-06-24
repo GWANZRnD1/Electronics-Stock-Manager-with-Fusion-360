@@ -49,6 +49,8 @@ export interface GerberRender {
   bottom?: RenderedSide;
   layerCount: number;
   ignored: string[]; // files skipped as non-board layers (drawing / unknown)
+  /** Diagnostic: how every candidate file was classified + whether it rendered. */
+  classification: { file: string; type: string | null; side: string | null; rendered: boolean }[];
 }
 
 interface StackupSide {
@@ -116,6 +118,13 @@ export async function renderGerber(files: Record<string, Uint8Array>): Promise<G
     return false;
   });
 
+  const classification = candidates.map((c) => ({
+    file: c.filename,
+    type: types[c.filename]?.type ?? null,
+    side: types[c.filename]?.side ?? null,
+    rendered: !ignored.includes(c.filename),
+  }));
+
   if (layers.length === 0) throw new Error("no Gerber layers found in the zip");
 
   const stackup = (await pcbStackup(layers)) as unknown as {
@@ -128,6 +137,7 @@ export async function renderGerber(files: Record<string, Uint8Array>): Promise<G
     bottom: toSide(stackup.bottom),
     layerCount: layers.length,
     ignored,
+    classification,
   };
 }
 
