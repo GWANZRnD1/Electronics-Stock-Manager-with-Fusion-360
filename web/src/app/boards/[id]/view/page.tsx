@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReaderOptions } from "zxing-wasm/reader";
 
 import { Nav } from "@/components/Nav";
@@ -608,6 +608,44 @@ export default function BoardViewPage() {
 // ===========================================================================
 // Board canvas: zoom/pan image + highlight overlay
 // ===========================================================================
+// Cheap, memoized click-target layer: renders once per placements/mapper change
+// (NOT on every selection) and dots scale with the zoom container, so there's no
+// per-marker work while zooming. Selection draws a separate box overlay on top.
+const PlacementDots = memo(function PlacementDots({
+  placements,
+  mapper,
+  calibrating,
+  onPlacementClick,
+}: {
+  placements: Placement[];
+  mapper: (x: number, y: number) => { fx: number; fy: number };
+  calibrating: boolean;
+  onPlacementClick: (p: Placement) => void;
+}) {
+  return (
+    <>
+      {placements.map((p) => {
+        const { fx, fy } = mapper(p.x, p.y);
+        if (!Number.isFinite(fx) || !Number.isFinite(fy)) return null;
+        return (
+          <button
+            key={p.id}
+            title={`${p.designator}${p.mpn ? ` · ${p.mpn}` : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!calibrating) onPlacementClick(p);
+            }}
+            className="absolute -translate-x-1/2 -translate-y-1/2"
+            style={{ left: `${fx * 100}%`, top: `${fy * 100}%` }}
+          >
+            <span className="block h-[5px] w-[5px] rounded-full bg-sky-500/60 ring-1 ring-white/50 hover:bg-sky-400" />
+          </button>
+        );
+      })}
+    </>
+  );
+});
+
 function BoardCanvas({
   boardId,
   side,
@@ -630,9 +668,64 @@ function BoardCanvas({
   onImageClick?: (frac: { x: number; y: number }) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const imgRef = useRef<HTMLImageElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null); // inline-block holding the image + overlay
   const [view, setView] = useState({ scale: 1, tx: 0, ty: 0 });
+  const [animate, setAnimate] = useState(false); // CSS transition only for programmatic moves
+  const [contentH, setContentH] = useState(675);
   const drag = useRef<{ x: number; y: number; tx: number; ty: number; moved: boolean } | null>(null);
+
+  const W0 = 900; // the board is laid out at a fixed 900px width; height tracks aspect
+
+  const fitView = useCallback(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const s = Math.min(r.width / W0, r.height / contentH);
+    setAnimate(true);
+    setView({ scale: s, tx: (r.width - s * W0) / 2, ty: (r.height - s * contentH) / 2 });
+  }, [contentH]);
+
+  const measure = useCallback(() => {
+    const h = contentRef.current?.offsetHeight;
+    if (h) setContentH(h);
+  }, []);
+
+  // Auto zoom/pan so the selected part(s) sit centred and prominent.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el || !mapper) return;
+    const pts = placements
+      .filter((p) => selected.has(norm(p.designator)))
+      .map((p) => mapper(p.x, p.y))
+      .filter((f) => Number.isFinite(f.fx) && Number.isFinite(f.fy));
+    if (pts.length === 0) return; // nothing selected on this side — leave the view as-is
+    let minx = 1, miny = 1, maxx = 0, maxy = 0;
+    for (const { fx, fy } of pts) {
+      minx = Math.min(minx, fx);
+      miny = Math.min(miny, fy);
+      maxx = Math.max(maxx, fx);
+      maxy = Math.max(maxy, fy);
+    }
+    const r = el.getBoundingClientRect();
+    const bw = (maxx - minx) * W0;
+    const bh = (maxy - miny) * contentH;
+    const fill = 0.5; // the selection fills ~half the viewport
+    let scale = bw < 4 && bh < 4 ? 5 : Math.min((r.width * fill) / bw, (r.height * fill) / bh);
+    scale = Math.min(8, Math.max(0.5, scale));
+    const cx = ((minx + maxx) / 2) * W0;
+    const cy = ((miny + maxy) / 2) * contentH;
+    setAnimate(true);
+    setView({ scale, tx: r.width / 2 - scale * cx, ty: r.height / 2 - scale * cy });
+  }, [selected, mapper, placements, contentH]);
+
+  // Fit on side change for the no-image case (the image's onLoad handles the rest).
+  useEffect(() => {
+    if (!hasImage) {
+      setContentH(675);
+      if (selected.size === 0) fitView();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [side, hasImage]);
 
   // Wheel zoom toward the cursor (non-passive so we can preventDefault).
   useEffect(() => {
@@ -640,12 +733,13 @@ function BoardCanvas({
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      setAnimate(false);
       setView((v) => {
         const rect = el.getBoundingClientRect();
         const cx = e.clientX - rect.left;
         const cy = e.clientY - rect.top;
         const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-        const scale = Math.min(20, Math.max(0.2, v.scale * factor));
+        const scale = Math.min(20, Math.max(0.15, v.scale * factor));
         const k = scale / v.scale;
         return { scale, tx: cx - (cx - v.tx) * k, ty: cy - (cy - v.ty) * k };
       });
@@ -656,6 +750,7 @@ function BoardCanvas({
 
   function onPointerDown(e: React.PointerEvent) {
     (e.target as Element).setPointerCapture?.(e.pointerId);
+    setAnimate(false);
     drag.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty, moved: false };
   }
   function onPointerMove(e: React.PointerEvent) {
@@ -669,34 +764,38 @@ function BoardCanvas({
     drag.current = null;
   }
 
-  // Click on the image surface (used only in calibration mode).
+  // Click on the board surface (used only in calibration mode).
   function onSurfaceClick(e: React.MouseEvent) {
-    if (drag.current?.moved) return;
-    if (!onImageClick || !imgRef.current) return;
-    const r = imgRef.current.getBoundingClientRect();
+    if (drag.current?.moved || !onImageClick) return;
+    const c = contentRef.current;
+    if (!c) return;
+    const r = c.getBoundingClientRect();
     const fx = (e.clientX - r.left) / r.width;
     const fy = (e.clientY - r.top) / r.height;
     if (fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1) onImageClick({ x: fx, y: fy });
   }
 
-  const reset = () => setView({ scale: 1, tx: 0, ty: 0 });
+  const zoomBy = (k: number) =>
+    setView((v) => {
+      setAnimate(true);
+      const r = viewportRef.current?.getBoundingClientRect();
+      const cx = r ? r.width / 2 : 0;
+      const cy = r ? r.height / 2 : 0;
+      const scale = Math.min(20, Math.max(0.15, v.scale * k));
+      const f = scale / v.scale;
+      return { scale, tx: cx - (cx - v.tx) * f, ty: cy - (cy - v.ty) * f };
+    });
 
   return (
     <div className="relative">
       <div className="absolute right-2 top-2 z-10 flex gap-1">
-        <button
-          className="rounded bg-black/50 px-2 py-0.5 text-sm text-white"
-          onClick={() => setView((v) => ({ ...v, scale: Math.min(20, v.scale * 1.25) }))}
-        >
+        <button className="rounded bg-black/50 px-2 py-0.5 text-sm text-white" onClick={() => zoomBy(1.25)}>
           +
         </button>
-        <button
-          className="rounded bg-black/50 px-2 py-0.5 text-sm text-white"
-          onClick={() => setView((v) => ({ ...v, scale: Math.max(0.2, v.scale / 1.25) }))}
-        >
+        <button className="rounded bg-black/50 px-2 py-0.5 text-sm text-white" onClick={() => zoomBy(1 / 1.25)}>
           −
         </button>
-        <button className="rounded bg-black/50 px-2 py-0.5 text-xs text-white" onClick={reset}>
+        <button className="rounded bg-black/50 px-2 py-0.5 text-xs text-white" onClick={fitView}>
           Fit
         </button>
       </div>
@@ -713,71 +812,67 @@ function BoardCanvas({
         onClick={onSurfaceClick}
       >
         {!hasImage && (
-          <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-black/40 dark:text-white/40">
-            No {side} image uploaded. {mapper ? "Highlights still work on the placement grid below." : ""}
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6 text-center text-sm text-black/40 dark:text-white/40">
+            No {side} image uploaded. {mapper ? "Highlights still work on the placement grid." : ""}
           </div>
         )}
         <div
-          className="absolute left-0 top-0 origin-top-left"
-          style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
+          className="absolute left-0 top-0 origin-top-left will-change-transform"
+          style={{
+            transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`,
+            transition: animate ? "transform 350ms ease" : "none",
+          }}
         >
-          <div className="relative inline-block">
+          <div ref={contentRef} className="relative inline-block">
             {hasImage ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                ref={imgRef}
                 src={`/api/boards/${boardId}/image?side=${side}`}
                 alt={`${side} of board`}
                 draggable={false}
+                onLoad={() => {
+                  measure();
+                  if (selected.size === 0) fitView();
+                }}
                 className="block max-w-none select-none"
                 style={{ width: "900px", height: "auto" }}
               />
             ) : (
-              // No image: render a neutral board-sized rectangle so dots have a surface.
-              <div ref={imgRef as unknown as React.RefObject<HTMLDivElement>} style={{ width: 900, height: 675 }} />
+              <div style={{ width: 900, height: 675 }} className="bg-neutral-200/40 dark:bg-neutral-800/40" />
             )}
 
-            {/* Highlight overlay */}
+            {/* Click targets (memoized — cheap, doesn't re-render on selection) */}
+            {mapper && (
+              <PlacementDots
+                placements={placements}
+                mapper={mapper}
+                calibrating={calibrating}
+                onPlacementClick={onPlacementClick}
+              />
+            )}
+
+            {/* Selected part box(es) */}
             {mapper &&
-              placements.map((p) => {
-                const { fx, fy } = mapper(p.x, p.y);
-                if (!Number.isFinite(fx) || !Number.isFinite(fy)) return null;
-                const isSel = selected.has(norm(p.designator));
-                return (
-                  <button
-                    key={p.id}
-                    title={`${p.designator}${p.mpn ? ` · ${p.mpn}` : ""}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (!calibrating) onPlacementClick(p);
-                    }}
-                    className="absolute"
-                    style={{
-                      left: `${fx * 100}%`,
-                      top: `${fy * 100}%`,
-                      transform: `translate(-50%, -50%) scale(${1 / view.scale})`,
-                    }}
-                  >
-                    <span
-                      className={`block rounded-full border ${
-                        isSel
-                          ? "h-4 w-4 border-white bg-red-500 shadow-[0_0_0_2px_rgba(239,68,68,0.5)]"
-                          : "h-2.5 w-2.5 border-white/80 bg-blue-500/70 hover:bg-blue-400"
-                      }`}
-                    />
-                    {isSel && (
-                      <span className="pointer-events-none absolute left-1/2 top-full -translate-x-1/2 whitespace-nowrap rounded bg-red-600 px-1 text-[10px] font-medium text-white">
-                        {p.designator}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+              placements
+                .filter((p) => selected.has(norm(p.designator)))
+                .map((p) => {
+                  const { fx, fy } = mapper(p.x, p.y);
+                  if (!Number.isFinite(fx) || !Number.isFinite(fy)) return null;
+                  return (
+                    <div
+                      key={p.id}
+                      className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2"
+                      style={{ left: `${fx * 100}%`, top: `${fy * 100}%` }}
+                    >
+                      <div className="h-[34px] w-[34px] rounded-[3px] border-2 border-amber-400 bg-amber-400/15 shadow-[0_0_0_2px_rgba(0,0,0,0.5)]" />
+                    </div>
+                  );
+                })}
           </div>
         </div>
       </div>
       <p className="mt-1 text-xs text-black/40 dark:text-white/40">
-        Scroll to zoom · drag to pan · click a dot to select.
+        Scroll to zoom · drag to pan · click a part to select. Selecting zooms to it.
       </p>
     </div>
   );
