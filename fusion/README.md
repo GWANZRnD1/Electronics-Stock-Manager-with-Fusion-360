@@ -83,10 +83,12 @@ The app's per-board **Assembly view** (`/boards/[id]/view`) shows the board, let
 you click a BOM part (or scan its barcode) to highlight where it sits, with
 zoom/pan and a filterable/sortable BOM.
 
-1. **Placements** — open the design in the **Board** editor, **Automate → Run ULP
-   →** `ulp/extract-placements.ulp`. It writes `<name>-placements.json`
-   (designator, X/Y mm, rotation, side, package, MPN + the board outline). In the
-   app, open the board → **Import placements (.json)**.
+1. **BOM + placements (one file)** — open the design in the **Board** editor,
+   **Automate → Run ULP →** `ulp/extract-board.ulp`. It writes `<name>-board.json`
+   with the grouped BOM *and* every part's X/Y, rotation, side + the board outline.
+   In the app, **Boards → Import board (.json)** loads both at once.
+   *(Alternatives: `extract-bom.ulp` for BOM only, or `extract-placements.ulp` for
+   positions only — imported via the board page's Import placements button.)*
 2. **A picture** — two ways:
    - **Gerber zip (recommended):** in the Assembly view click **Upload Gerber zip
      (auto-align)**. The app renders top + bottom from the Gerbers and aligns the

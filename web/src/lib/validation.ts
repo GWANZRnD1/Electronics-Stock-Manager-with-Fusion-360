@@ -165,19 +165,35 @@ const placementSchema = z.object({
   mpn: z.string().trim().max(128).optional().nullable(),
 });
 
+const outlineSchema = z.object({
+  minX: z.number(),
+  minY: z.number(),
+  maxX: z.number(),
+  maxY: z.number(),
+});
+
 export const placementsImportSchema = z.object({
   board: z.object({
     name: z.string().trim().min(1).max(128),
     fusionDocId: z.string().trim().max(256).optional().nullable(),
     revision: z.string().trim().max(64).optional(),
   }),
-  outline: z.object({
-    minX: z.number(),
-    minY: z.number(),
-    maxX: z.number(),
-    maxY: z.number(),
-  }),
+  outline: outlineSchema,
   placements: z.array(placementSchema).max(20_000),
+});
+
+// Combined board import: BOM lines plus (optionally) outline + placements, from
+// extract-board.ulp. `outline`/`placements` are optional so plain extract-bom.ulp
+// files (BOM only) keep working through the same endpoint.
+export const boardImportSchema = z.object({
+  board: z.object({
+    name: z.string().trim().min(1).max(128),
+    fusionDocId: z.string().trim().max(256).optional().nullable(),
+    revision: z.string().trim().max(64).optional(),
+  }),
+  lines: z.array(bomLineInputSchema).max(5_000),
+  outline: outlineSchema.optional(),
+  placements: z.array(placementSchema).max(20_000).optional(),
 });
 
 // A single fractional/mm reference point for manual image calibration.

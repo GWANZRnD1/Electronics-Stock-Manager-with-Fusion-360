@@ -1,0 +1,190 @@
+#usage "en: <b>Extract this board's BOM <i>and</i> component placements in one file.</b> "
+       "Run from the <b>Board</b> editor. Writes a single <b>.json</b> with the grouped "
+       "BOM (MPN, qty, designators) plus every part's X/Y, rotation, side and the board "
+       "outline — ready to import on the app's board page (one upload does both the BOM "
+       "and the Assembly-view highlighting). Read-only; changes nothing in the design.\n"
+
+// ---------------------------------------------------------------------------
+// This merges extract-bom.ulp (grouped BOM) and extract-placements.ulp
+// (per-element XY + outline) into ONE pass over the board, so you upload once.
+// The board editor carries the same MPN attributes as the schematic, so the BOM
+// is equivalent; positions only exist on the board, which is why this runs here.
+// ---------------------------------------------------------------------------
+
+string jsonEscape(string s) {
+  string out = "";
+  int n = strlen(s);
+  for (int i = 0; i < n; i++) {
+    string c = strsub(s, i, 1);
+    if      (c == "\"") out += "\\\"";
+    else if (c == "\\") out += "\\\\";
+    else if (c == "\n") out += "\\n";
+    else if (c == "\r") out += "\\r";
+    else if (c == "\t") out += "\\t";
+    else out += c;
+  }
+  return out;
+}
+
+int lastSep(string s) {
+  int a = strrchr(s, '/');
+  int b = strrchr(s, '\\');
+  return a > b ? a : b;
+}
+
+string baseName(string path) {
+  string f = strsub(path, lastSep(path) + 1);
+  int dot = strrchr(f, '.');
+  if (dot > 0) f = strsub(f, 0, dot);
+  return f;
+}
+
+int isMpnAttr(string nameUpper) {
+  return (nameUpper == "MPN" ||
+          nameUpper == "MANUFACTURER_PART_NUMBER" ||
+          nameUpper == "MANUFACTURERPARTNUMBER" ||
+          nameUpper == "MFR_PN" ||
+          nameUpper == "MF_PARTNUMBER" ||
+          nameUpper == "PART_NUMBER");
+}
+
+string mpnOfElement(UL_ELEMENT E) {
+  string mpn = "";
+  E.attributes(A) {
+    if (A.value != "" && isMpnAttr(strupr(A.name))) mpn = A.value;
+  }
+  return mpn;
+}
+
+int isFrame(string nm, string pkgName) {
+  return (strsub(strupr(nm), 0, 5) == "FRAME" ||
+          strupr(pkgName) == "CREATIVE_COMMONS");
+}
+
+// --- Grouped BOM accumulation (identical to extract-bom.ulp) ----------------
+string bomKey[];
+string bomMpn[];
+string bomValue[];
+string bomPkg[];
+string bomDes[];
+int    bomQty[];
+int    bomN = 0;
+
+void addPart(string mpn, string value, string pkg, string refdes) {
+  string key;
+  if (mpn != "") key = "M\t" + mpn;
+  else           key = "V\t" + value + "\t" + pkg;
+
+  int idx = -1;
+  for (int i = 0; i < bomN; i++) if (bomKey[i] == key) { idx = i; break; }
+
+  if (idx < 0) {
+    bomKey[bomN]   = key;
+    bomMpn[bomN]   = mpn;
+    bomValue[bomN] = value;
+    bomPkg[bomN]   = pkg;
+    bomDes[bomN]   = refdes;
+    bomQty[bomN]   = 1;
+    bomN++;
+  } else {
+    bomQty[idx]++;
+    if (strlen(bomDes[idx]) < 240) bomDes[idx] += "," + refdes;
+  }
+}
+
+// --- Outline bbox (Dimension layer 20 wires), in internal units -------------
+int haveBox = 0;
+int bxMin = 0, byMin = 0, bxMax = 0, byMax = 0;
+
+void grow(int x, int y) {
+  if (!haveBox) { bxMin = x; bxMax = x; byMin = y; byMax = y; haveBox = 1; return; }
+  if (x < bxMin) bxMin = x;
+  if (x > bxMax) bxMax = x;
+  if (y < byMin) byMin = y;
+  if (y > byMax) byMax = y;
+}
+
+if (!board) {
+  dlgMessageBox("Open this from a Board editor — it reads the active board.");
+  exit(0);
+}
+
+string boardName = "design";
+int    total = 0;
+int    skipped = 0;
+string placeRows = "";
+
+board(B) {
+  boardName = baseName(B.name);
+
+  B.wires(W) {
+    if (W.layer == 20) { grow(W.x1, W.y1); grow(W.x2, W.y2); }
+  }
+
+  B.elements(E) {
+    if (!E.populate) { skipped++; continue; }
+    if (!E.package)  { skipped++; continue; }
+    if (isFrame(E.name, E.package.name)) { skipped++; continue; }
+
+    string mpn  = mpnOfElement(E);
+    string side = E.mirror ? "bottom" : "top";
+
+    addPart(mpn, E.value, E.package.name, E.name);
+
+    string row;
+    sprintf(row,
+      "    {\"designator\": \"%s\", \"x\": %f, \"y\": %f, \"angle\": %f, "
+      "\"side\": \"%s\", \"package\": \"%s\", \"mpn\": %s}",
+      jsonEscape(E.name), u2mm(E.x), u2mm(E.y), E.angle,
+      side, jsonEscape(E.package.name),
+      mpn != "" ? "\"" + jsonEscape(mpn) + "\"" : "null");
+    if (total > 0) placeRows += ",\n";
+    placeRows += row;
+    total++;
+  }
+}
+
+if (total == 0) {
+  dlgMessageBox("No placed, populated components were found on this board.");
+  exit(0);
+}
+if (!haveBox) { board(B) { B.elements(E) { grow(E.x, E.y); } } }
+
+string jsonFile = dlgFileSave("Save board (BOM + placements JSON for the Stock Manager)",
+                              boardName + "-board.json",
+                              "JSON files (*.json);;All files (*)");
+if (jsonFile == "") exit(0);
+
+output(jsonFile, "wt") {
+  printf("{\n");
+  printf("  \"board\": { \"name\": \"%s\" },\n", jsonEscape(boardName));
+  printf("  \"outline\": { \"minX\": %f, \"minY\": %f, \"maxX\": %f, \"maxY\": %f },\n",
+         u2mm(bxMin), u2mm(byMin), u2mm(bxMax), u2mm(byMax));
+  printf("  \"lines\": [\n");
+  for (int i = 0; i < bomN; i++) {
+    printf("    {");
+    if (bomMpn[i] != "") printf("\"partMpn\": \"%s\", ", jsonEscape(bomMpn[i]));
+    else                 printf("\"partMpn\": null, ");
+    printf("\"value\": \"%s\", \"package\": \"%s\", \"designators\": \"%s\", \"qtyPerBoard\": %d}",
+           jsonEscape(bomValue[i]), jsonEscape(bomPkg[i]), jsonEscape(bomDes[i]), bomQty[i]);
+    if (i < bomN - 1) printf(",");
+    printf("\n");
+  }
+  printf("  ],\n");
+  printf("  \"placements\": [\n");
+  printf("%s\n", placeRows);
+  printf("  ]\n}\n");
+}
+
+int withMpn = 0;
+for (int i = 0; i < bomN; i++) if (bomMpn[i] != "") withMpn++;
+
+string msg, tmp;
+sprintf(msg, "Board \"%s\" extracted (BOM + placements).\n\n", boardName);
+sprintf(tmp, "Components: %d\nBOM line items: %d (with MPN: %d)\nSkipped: %d\n",
+        total, bomN, withMpn, skipped);
+msg += tmp;
+msg += "\nSaved:\n  " + jsonFile +
+       "\n\nNext: in the app, Boards → Import board (.json). It loads the BOM and the "
+       "placements together; then upload the Gerber zip in the Assembly view for the picture.";
+dlgMessageBox(msg);

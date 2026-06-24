@@ -259,7 +259,7 @@ export default function BoardsPage() {
             className="rounded-md border border-black/15 px-4 py-2 font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/[0.04]"
             disabled={busy}
           >
-            {busy ? "Working…" : "Import BOM (.json)"}
+            {busy ? "Working…" : "Import board (.json)"}
           </button>
           <input
             ref={fileRef}
@@ -270,9 +270,10 @@ export default function BoardsPage() {
           />
         </div>
         <p className="mb-6 text-sm text-black/50 dark:text-white/50">
-          Import the <code>.json</code> from Fusion&rsquo;s <code>extract-bom.ulp</code> — you&rsquo;ll
-          be asked for a revision, then it creates (or updates) that revision and opens it. Same
-          name, different revision = a new revision under that board.
+          Import the <code>.json</code> from Fusion&rsquo;s <code>extract-board.ulp</code> (BOM +
+          placements in one file) or <code>extract-bom.ulp</code> (BOM only) — you&rsquo;ll be asked
+          for a revision, then it creates (or updates) that revision and opens it. Same name,
+          different revision = a new revision under that board.
         </p>
 
         {active.length === 0 ? (
