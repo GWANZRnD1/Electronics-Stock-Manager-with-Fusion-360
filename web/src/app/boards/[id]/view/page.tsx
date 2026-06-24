@@ -115,9 +115,9 @@ export default function BoardViewPage() {
 
   // BOM list controls.
   const [query, setQuery] = useState("");
-  const [sortKey, setSortKey] = useState<"designators" | "partMpn" | "value" | "package" | "qtyPerBoard">(
-    "designators",
-  );
+  const [sortKey, setSortKey] = useState<
+    "designators" | "partMpn" | "value" | "package" | "qtyPerBoard" | "side"
+  >("designators");
   const [sortDir, setSortDir] = useState<1 | -1>(1);
 
   // Calibration + scanning UI.
@@ -166,6 +166,31 @@ export default function BoardViewPage() {
     for (const row of bom) for (const d of splitDesignators(row.designators)) m.set(norm(d), row);
     return m;
   }, [bom]);
+
+  // designator (uppercase) -> which side it's placed on (from the placements).
+  const designatorSide = useMemo(() => {
+    const m = new Map<string, Side>();
+    for (const p of bundle.placements) m.set(norm(p.designator), p.side);
+    return m;
+  }, [bundle.placements]);
+
+  // A BOM line's side label, aggregated over its designators' placements.
+  const sideLabel = useCallback(
+    (row: BomRow): string => {
+      let top = false;
+      let bottom = false;
+      for (const d of splitDesignators(row.designators)) {
+        const s = designatorSide.get(norm(d));
+        if (s === "top") top = true;
+        else if (s === "bottom") bottom = true;
+      }
+      if (top && bottom) return "Both";
+      if (top) return "Top";
+      if (bottom) return "Bottom";
+      return "—";
+    },
+    [designatorSide],
+  );
 
   const image = bundle.images.find((im) => im.side === side) ?? null;
   const outline = bundle.outline;
@@ -377,12 +402,12 @@ export default function BoardViewPage() {
       : bom;
     const sorted = [...rows].sort((a, b) => {
       if (sortKey === "qtyPerBoard") return (a.qtyPerBoard - b.qtyPerBoard) * sortDir;
-      const av = (a[sortKey] ?? "") as string;
-      const bv = (b[sortKey] ?? "") as string;
+      const av = sortKey === "side" ? sideLabel(a) : ((a[sortKey] ?? "") as string);
+      const bv = sortKey === "side" ? sideLabel(b) : ((b[sortKey] ?? "") as string);
       return av.localeCompare(bv, undefined, { numeric: true }) * sortDir;
     });
     return sorted;
-  }, [bom, query, sortKey, sortDir]);
+  }, [bom, query, sortKey, sortDir, sideLabel]);
 
   function toggleSort(key: typeof sortKey) {
     if (key === sortKey) setSortDir((d) => (d === 1 ? -1 : 1));
@@ -567,11 +592,12 @@ export default function BoardViewPage() {
                 <thead className="sticky top-0 bg-[var(--background)] text-black/50 dark:text-white/50">
                   <tr className="border-b border-black/10 dark:border-white/15">
                     {([
+                      ["qtyPerBoard", "Qty"],
+                      ["designators", "Designators"],
+                      ["side", "Top/Bottom"],
                       ["partMpn", "Part"],
                       ["value", "Value"],
                       ["package", "Pkg"],
-                      ["qtyPerBoard", "Qty"],
-                      ["designators", "Designators"],
                     ] as [typeof sortKey, string][]).map(([key, label]) => (
                       <th
                         key={key}
@@ -597,19 +623,20 @@ export default function BoardViewPage() {
                           isSel ? "bg-blue-500/15" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                         }`}
                       >
-                        <td className="px-2 py-1.5 font-mono">{row.partMpn || "—"}</td>
-                        <td className="px-2 py-1.5">{row.value}</td>
-                        <td className="px-2 py-1.5">{row.package}</td>
                         <td className="px-2 py-1.5 text-right tabular-nums">{row.qtyPerBoard}</td>
                         <td className="px-2 py-1.5 text-xs text-black/60 dark:text-white/60">
                           {row.designators}
                         </td>
+                        <td className="px-2 py-1.5 whitespace-nowrap">{sideLabel(row)}</td>
+                        <td className="px-2 py-1.5 font-mono">{row.partMpn || "—"}</td>
+                        <td className="px-2 py-1.5">{row.value}</td>
+                        <td className="px-2 py-1.5">{row.package}</td>
                       </tr>
                     );
                   })}
                   {filteredBom.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="px-2 py-6 text-center text-black/40 dark:text-white/40">
+                      <td colSpan={6} className="px-2 py-6 text-center text-black/40 dark:text-white/40">
                         {bom.length === 0 ? "No BOM imported for this board." : "No matches."}
                       </td>
                     </tr>
