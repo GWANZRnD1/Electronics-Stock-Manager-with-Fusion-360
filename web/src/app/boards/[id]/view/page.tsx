@@ -38,6 +38,8 @@ interface Placement {
   side: Side;
   package: string;
   mpn: string | null;
+  // Exact footprint bbox in board mm (from the ULP); null for pick-and-place.
+  bbox: { x1: number; y1: number; x2: number; y2: number } | null;
 }
 
 interface Outline {
@@ -92,6 +94,21 @@ function makeMapper(
     fx: side === "bottom" ? (outline.maxX - x) / w : (x - outline.minX) / w,
     fy: (outline.maxY - y) / h,
   });
+}
+
+// Map a placement's footprint bbox (board mm) through the mapper to a rectangle in
+// image fractions (0..1): { left, top, w, h }. Returns null if there's no bbox.
+function footprintRect(
+  p: Placement,
+  mapper: (x: number, y: number) => { fx: number; fy: number },
+): { left: number; top: number; w: number; h: number } | null {
+  if (!p.bbox) return null;
+  const a = mapper(p.bbox.x1, p.bbox.y1);
+  const b = mapper(p.bbox.x2, p.bbox.y2);
+  if (![a.fx, a.fy, b.fx, b.fy].every(Number.isFinite)) return null;
+  const left = Math.min(a.fx, b.fx);
+  const top = Math.min(a.fy, b.fy);
+  return { left, top, w: Math.abs(b.fx - a.fx), h: Math.abs(b.fy - a.fy) };
 }
 
 const norm = (s: string) => s.trim().toUpperCase();
@@ -999,16 +1016,41 @@ const PlacementDots = memo(function PlacementDots({
   return (
     <>
       {placements.map((p) => {
+        const title = `${p.designator}${p.mpn ? ` · ${p.mpn}` : ""}`;
+        const onClick = (e: React.MouseEvent) => {
+          e.stopPropagation();
+          if (!calibrating) onPlacementClick(p);
+        };
+
+        // Exact footprint: the whole rectangle is the click/hover target.
+        const rect = footprintRect(p, mapper);
+        if (rect && rect.w > 0 && rect.h > 0) {
+          return (
+            <button
+              key={p.id}
+              title={title}
+              onClick={onClick}
+              className="group absolute"
+              style={{
+                left: `${rect.left * 100}%`,
+                top: `${rect.top * 100}%`,
+                width: `${rect.w * 100}%`,
+                height: `${rect.h * 100}%`,
+              }}
+            >
+              <span className="block h-full w-full rounded-[2px] border border-sky-400/50 bg-sky-400/0 transition-colors group-hover:border-sky-300 group-hover:bg-sky-400/25" />
+            </button>
+          );
+        }
+
+        // Fallback (pick-and-place / no bbox): a small centroid dot.
         const { fx, fy } = mapper(p.x, p.y);
         if (!Number.isFinite(fx) || !Number.isFinite(fy)) return null;
         return (
           <button
             key={p.id}
-            title={`${p.designator}${p.mpn ? ` · ${p.mpn}` : ""}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (!calibrating) onPlacementClick(p);
-            }}
+            title={title}
+            onClick={onClick}
             className="absolute -translate-x-1/2 -translate-y-1/2"
             style={{ left: `${fx * 100}%`, top: `${fy * 100}%` }}
           >
@@ -1267,11 +1309,27 @@ function BoardCanvas({
                 );
               })()}
 
-            {/* Selected part box(es) */}
+            {/* Selected part highlight: the exact footprint rectangle when we have
+                a bbox, otherwise a fixed-size box on the centroid. */}
             {mapper &&
               placements
                 .filter((p) => selected.has(norm(p.designator)))
                 .map((p) => {
+                  const rect = footprintRect(p, mapper);
+                  if (rect && rect.w > 0 && rect.h > 0) {
+                    return (
+                      <div
+                        key={p.id}
+                        className="pointer-events-none absolute rounded-[2px] border-2 border-red-500 bg-red-500/20 shadow-[0_0_0_2px_rgba(0,0,0,0.55)]"
+                        style={{
+                          left: `${rect.left * 100}%`,
+                          top: `${rect.top * 100}%`,
+                          width: `${rect.w * 100}%`,
+                          height: `${rect.h * 100}%`,
+                        }}
+                      />
+                    );
+                  }
                   const { fx, fy } = mapper(p.x, p.y);
                   if (!Number.isFinite(fx) || !Number.isFinite(fy)) return null;
                   return (

@@ -139,6 +139,13 @@ export const componentPlacements = pgTable(
     side: text("side").notNull().default("top"), // "top" | "bottom"
     package: text("package").notNull().default(""),
     mpn: text("mpn"), // manufacturer part number if the element carried one
+    // Exact footprint bounding box in board mm (the placed/rotated/mirrored extent
+    // from EAGLE's UL_ELEMENT.area). Null for pick-and-place imports (centroid only),
+    // in which case the view falls back to a centroid dot.
+    bx1: numeric("bx1", { precision: 12, scale: 4 }),
+    by1: numeric("by1", { precision: 12, scale: 4 }),
+    bx2: numeric("bx2", { precision: 12, scale: 4 }),
+    by2: numeric("by2", { precision: 12, scale: 4 }),
   },
   (t) => [index("placements_board_idx").on(t.boardId)],
 );

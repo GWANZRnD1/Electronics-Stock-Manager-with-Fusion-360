@@ -163,6 +163,12 @@ const placementSchema = z.object({
   side: sideSchema.optional().default("top"),
   package: z.string().trim().max(64).optional().default(""),
   mpn: z.string().trim().max(128).optional().nullable(),
+  // Exact footprint bounding box (board mm). Present from the ULP (UL_ELEMENT.area);
+  // absent from plain pick-and-place files.
+  bx1: z.number().optional().nullable(),
+  by1: z.number().optional().nullable(),
+  bx2: z.number().optional().nullable(),
+  by2: z.number().optional().nullable(),
 });
 
 const outlineSchema = z.object({

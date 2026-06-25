@@ -66,6 +66,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       side: p.side as "top" | "bottom",
       package: p.package,
       mpn: p.mpn,
+      // Exact footprint bbox in board mm, when the ULP supplied it.
+      bbox:
+        p.bx1 != null && p.by1 != null && p.bx2 != null && p.by2 != null
+          ? { x1: Number(p.bx1), y1: Number(p.by1), x2: Number(p.bx2), y2: Number(p.by2) }
+          : null,
     })),
     images: images.map((im) => ({
       side: im.side as "top" | "bottom",
