@@ -116,9 +116,10 @@ board(B) {
     string side = E.mirror ? "bottom" : "top";
     string mpn  = mpnOfElement(E);
 
-    // Exact footprint bounding box (mm), already placed/rotated/mirrored.
-    real bx1 = u2mm(E.area.x1), by1 = u2mm(E.area.y1);
-    real bx2 = u2mm(E.area.x2), by2 = u2mm(E.area.y2);
+    // Exact footprint bounding box (mm). The package is accessed through the
+    // placed element, so its area is already in board coordinates (rotated/mirrored).
+    real bx1 = u2mm(E.package.area.x1), by1 = u2mm(E.package.area.y1);
+    real bx2 = u2mm(E.package.area.x2), by2 = u2mm(E.package.area.y2);
 
     string row;
     sprintf(row,
