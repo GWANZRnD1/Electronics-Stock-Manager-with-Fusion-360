@@ -132,11 +132,6 @@ export interface PlacementInput {
   side?: "top" | "bottom";
   package?: string;
   mpn?: string | null;
-  // Exact footprint bbox in board mm (from the ULP); absent for pick-and-place.
-  bx1?: number | null;
-  by1?: number | null;
-  bx2?: number | null;
-  by2?: number | null;
 }
 
 export interface Outline {
@@ -165,7 +160,6 @@ export async function replacePlacements(
       .where(eq(boards.id, boardId));
     await tx.delete(componentPlacements).where(eq(componentPlacements.boardId, boardId));
     if (placements.length > 0) {
-      const mm = (v: number | null | undefined) => (v == null ? null : String(v));
       await tx.insert(componentPlacements).values(
         placements.map((p) => ({
           boardId,
@@ -176,10 +170,6 @@ export async function replacePlacements(
           side: p.side ?? "top",
           package: p.package ?? "",
           mpn: p.mpn?.trim() || null,
-          bx1: mm(p.bx1),
-          by1: mm(p.by1),
-          bx2: mm(p.bx2),
-          by2: mm(p.by2),
         })),
       );
     }

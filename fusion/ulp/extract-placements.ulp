@@ -116,20 +116,13 @@ board(B) {
     string side = E.mirror ? "bottom" : "top";
     string mpn  = mpnOfElement(E);
 
-    // Exact footprint bounding box (mm). The package is accessed through the
-    // placed element, so its area is already in board coordinates (rotated/mirrored).
-    real bx1 = u2mm(E.package.area.x1), by1 = u2mm(E.package.area.y1);
-    real bx2 = u2mm(E.package.area.x2), by2 = u2mm(E.package.area.y2);
-
     string row;
     sprintf(row,
       "    {\"designator\": \"%s\", \"x\": %f, \"y\": %f, \"angle\": %f, "
-      "\"side\": \"%s\", \"package\": \"%s\", \"mpn\": %s, "
-      "\"bx1\": %f, \"by1\": %f, \"bx2\": %f, \"by2\": %f}",
+      "\"side\": \"%s\", \"package\": \"%s\", \"mpn\": %s}",
       jsonEscape(E.name), u2mm(E.x), u2mm(E.y), E.angle,
       side, jsonEscape(E.package.name),
-      mpn != "" ? "\"" + jsonEscape(mpn) + "\"" : "null",
-      bx1, by1, bx2, by2);
+      mpn != "" ? "\"" + jsonEscape(mpn) + "\"" : "null");
 
     if (total > 0) rows += ",\n";
     rows += row;

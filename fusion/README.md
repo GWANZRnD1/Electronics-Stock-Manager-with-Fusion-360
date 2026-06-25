@@ -85,17 +85,10 @@ zoom/pan and a filterable/sortable BOM.
 
 1. **BOM + placements (one file)** — open the design in the **Board** editor,
    **Automate → Run ULP →** `ulp/extract-board.ulp`. It writes `<name>-board.json`
-   with the grouped BOM *and* every part's X/Y, rotation, side, **exact footprint
-   bounding box** + the board outline. In the app, **Boards → Import board (.json)**
-   loads both at once.
+   with the grouped BOM *and* every part's X/Y, rotation, side + the board outline.
+   In the app, **Boards → Import board (.json)** loads both at once.
    *(Alternatives: `extract-bom.ulp` for BOM only, or `extract-placements.ulp` for
    positions only — imported via the board page's Import placements button.)*
-
-   The footprint bbox (`bx1/by1/bx2/by2`, board mm, from EAGLE's `UL_ELEMENT.area`)
-   lets the Assembly view **outline each component exactly and make the whole
-   footprint the click/hover target** instead of a small centroid dot. Pick-and-place
-   imports (Gerber zip) carry only a centroid, so those fall back to the dot — re-run
-   `extract-placements.ulp`/`extract-board.ulp` to get the outlines.
 2. **A picture** — two ways:
    - **Gerber zip (recommended):** in the Assembly view click **Upload Gerber zip
      (auto-align)**. The app renders top + bottom from the Gerbers and aligns the

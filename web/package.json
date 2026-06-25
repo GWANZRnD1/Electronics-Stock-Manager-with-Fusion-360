@@ -18,7 +18,6 @@
     "db:reset": "tsx scripts/db-reset.ts",
     "db:apply-aruco": "tsx scripts/apply-aruco-schema.ts",
     "db:apply-board-view": "tsx scripts/apply-board-view-schema.ts",
-    "db:apply-placement-bbox": "tsx scripts/apply-placement-bbox.ts",
     "dk:probe": "tsx scripts/dk-probe.ts"
   },
   "dependencies": {
