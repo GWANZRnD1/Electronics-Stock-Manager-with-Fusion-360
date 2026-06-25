@@ -1069,12 +1069,8 @@ function BoardCanvas({
     if (h) setContentH(h);
   }, []);
 
-  // Selecting a part fits the whole board, so the red arrow from the centre and
-  // the box around the part are both visible.
-  useEffect(() => {
-    if (!mapper) return;
-    if (placements.some((p) => selected.has(norm(p.designator)))) fitView();
-  }, [selected, mapper, placements, contentH, fitView]);
+  // Selecting a part does NOT change the zoom/pan — the highlight is drawn in
+  // place so the current view is preserved (no jarring zoom-out on every click).
 
   // Re-fit when the side changes. Both side images stay mounted (toggled with CSS),
   // so switching never reloads — we just re-measure the now-active image's height
@@ -1288,7 +1284,7 @@ function BoardCanvas({
         </div>
       </div>
       <p className="mt-1 text-xs text-black/40 dark:text-white/40">
-        Scroll to zoom · drag to pan · click a part to select. Selecting zooms to it.
+        Scroll to zoom · drag to pan · click a part to select · Fit resets the view.
       </p>
     </div>
   );
