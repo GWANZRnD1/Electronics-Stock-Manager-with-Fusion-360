@@ -634,11 +634,11 @@ export default function BoardViewPage() {
             )}
 
             <BoardCanvas
-              key={side}
               boardId={Number(id)}
               side={side}
               imgVersion={imgVersion}
-              hasImage={Boolean(image)}
+              hasTop={hasTop}
+              hasBottom={hasBottom}
               mapper={mapper}
               placements={placementsThisSide}
               selected={selected}
@@ -1024,7 +1024,8 @@ function BoardCanvas({
   boardId,
   side,
   imgVersion,
-  hasImage,
+  hasTop,
+  hasBottom,
   mapper,
   placements,
   selected,
@@ -1035,7 +1036,8 @@ function BoardCanvas({
   boardId: number;
   side: Side;
   imgVersion: number;
-  hasImage: boolean;
+  hasTop: boolean;
+  hasBottom: boolean;
   mapper: ((x: number, y: number) => { fx: number; fy: number }) | null;
   placements: Placement[];
   selected: Set<string>;
@@ -1051,6 +1053,7 @@ function BoardCanvas({
   const drag = useRef<{ x: number; y: number; tx: number; ty: number; moved: boolean } | null>(null);
 
   const W0 = 900; // the board is laid out at a fixed 900px width; height tracks aspect
+  const hasActiveImage = side === "top" ? hasTop : hasBottom;
 
   const fitView = useCallback(() => {
     const el = viewportRef.current;
@@ -1073,14 +1076,19 @@ function BoardCanvas({
     if (placements.some((p) => selected.has(norm(p.designator)))) fitView();
   }, [selected, mapper, placements, contentH, fitView]);
 
-  // Fit on side change for the no-image case (the image's onLoad handles the rest).
+  // Re-fit when the side changes. Both side images stay mounted (toggled with CSS),
+  // so switching never reloads — we just re-measure the now-active image's height
+  // and fit it. (For a side with no image we fall back to the placeholder height.)
   useEffect(() => {
-    if (!hasImage) {
+    if (hasActiveImage) {
+      measure();
+    } else {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setContentH(675);
-      if (selected.size === 0) fitView();
     }
+    if (selected.size === 0) fitView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [side, hasImage]);
+  }, [side, hasActiveImage]);
 
   // Wheel zoom toward the cursor (non-passive so we can preventDefault).
   useEffect(() => {
@@ -1166,7 +1174,7 @@ function BoardCanvas({
         onPointerLeave={onPointerUp}
         onClick={onSurfaceClick}
       >
-        {!hasImage && (
+        {!hasActiveImage && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6 text-center text-sm text-black/40 dark:text-white/40">
             No {side} image uploaded. {mapper ? "Highlights still work on the placement grid." : ""}
           </div>
@@ -1179,20 +1187,28 @@ function BoardCanvas({
           }}
         >
           <div ref={contentRef} className="relative inline-block">
-            {hasImage ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={`/api/boards/${boardId}/image?side=${side}&v=${imgVersion}`}
-                alt={`${side} of board`}
-                draggable={false}
-                onLoad={() => {
-                  measure();
-                  if (selected.size === 0) fitView();
-                }}
-                className="block max-w-none select-none"
-                style={{ width: "900px", height: "auto" }}
-              />
-            ) : (
+            {/* Both sides stay mounted so switching is a pure CSS swap (no reload /
+                re-decode). The active side is shown and drives the layout height;
+                the other is display:none but already loaded and ready. */}
+            {(["top", "bottom"] as Side[]).map((s) =>
+              (s === "top" ? hasTop : hasBottom) ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={s}
+                  src={`/api/boards/${boardId}/image?side=${s}&v=${imgVersion}`}
+                  alt={`${s} of board`}
+                  draggable={false}
+                  onLoad={() => {
+                    if (s !== side) return;
+                    measure();
+                    if (selected.size === 0) fitView();
+                  }}
+                  className={`max-w-none select-none ${s === side ? "block" : "hidden"}`}
+                  style={{ width: "900px", height: "auto" }}
+                />
+              ) : null,
+            )}
+            {!hasActiveImage && (
               <div style={{ width: 900, height: 675 }} className="bg-neutral-200/40 dark:bg-neutral-800/40" />
             )}
 
