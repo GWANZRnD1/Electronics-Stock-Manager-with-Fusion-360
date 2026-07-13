@@ -21,21 +21,23 @@ interface Family {
 }
 
 /**
- * Read an uploaded BOM JSON. Fusion's ULP `output()` writes in the OS ANSI code
- * page, not UTF-8 — on Korean Windows that's cp949/EUC-KR (so `µ`→μ, `Ω`, `±`
- * come out as multi-byte EUC-KR). Try UTF-8 strictly, then EUC-KR, then a final
- * windows-1252 safety net (never throws), and use whichever decodes cleanly.
+ * Read an uploaded BOM JSON. Fusion's ULP `output()` writes the OS ANSI code
+ * page, not UTF-8 — in practice Latin-1/Windows-1252, so e.g. `µ` is the single
+ * byte 0xB5. Try UTF-8 strictly first; if that fails, fall back to Windows-1252,
+ * which never throws and maps 0x80–0xFF straight to their Latin-1 characters.
+ * We deliberately do NOT try EUC-KR: it would greedily pair a stray high byte
+ * with the following ASCII byte and mint a bogus Hangul syllable (e.g. "µF" →
+ * "킚") — the exact corruption this used to produce. (The ULP now also emits
+ * plain ASCII, so a clean export decodes as UTF-8 and never needs the fallback.)
  */
 async function readBomJson(file: File): Promise<unknown> {
   const buf = await file.arrayBuffer();
-  for (const label of ["utf-8", "euc-kr"]) {
-    try {
-      const text = new TextDecoder(label, { fatal: true }).decode(buf);
-      return JSON.parse(text.replace(/^﻿/, "")); // strip a leading BOM
-    } catch (e) {
-      if (e instanceof SyntaxError) throw e; // decoded fine but isn't valid JSON
-      // otherwise this encoding didn't fit — try the next one
-    }
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+    return JSON.parse(text.replace(/^﻿/, "")); // strip a leading BOM
+  } catch (e) {
+    if (e instanceof SyntaxError) throw e; // decoded fine but isn't valid JSON
+    // not valid UTF-8 — fall through to the Latin-1 reading
   }
   const text = new TextDecoder("windows-1252").decode(buf);
   return JSON.parse(text.replace(/^﻿/, ""));

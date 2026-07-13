@@ -39,11 +39,13 @@ string noComma(string s) {
 }
 
 // Transliterate the handful of non-ASCII symbols that turn up in component
-// values into plain ASCII. Fusion's ULP output() writes UTF-8; when the CSV is
-// opened in Excel (or any tool) on a non-UTF-8 locale those bytes are decoded as
-// the local code page and mangled — e.g. the ohm sign "Ω" becomes a CJK glyph
-// like "廓". Emitting ASCII makes the file survive that round-trip in any tool.
-// Matched by raw UTF-8 byte sequence, so this needs no non-ASCII in the source.
+// values into plain ASCII. Fusion's ULP output() writes the OS ANSI code page
+// (observed: Latin-1/Windows-1252, so "µ" is the single byte 0xB5). Left as-is,
+// that byte gets mis-decoded downstream — read as EUC-KR it pairs with the next
+// character into a bogus Hangul (e.g. "µF" -> "킚"), and Excel mangles it too.
+// Emitting ASCII makes the file survive any tool. We match Latin-1 single bytes
+// plus the UTF-8 and cp949 multi-byte forms, so it works whatever locale wrote
+// the file — and needs no non-ASCII in this source.
 string toAscii(string s) {
   string out = "";
   int n = strlen(s);
@@ -53,13 +55,26 @@ string toAscii(string s) {
     if (b0 < 0x80) { out += strsub(s, i, 1); i += 1; continue; }
     int b1 = (i + 1 < n) ? (s[i + 1] & 0xFF) : 0;
     int b2 = (i + 2 < n) ? (s[i + 2] & 0xFF) : 0;
-    if      (b0 == 0xCE && b1 == 0xA9)               { out += "ohm"; i += 2; } // Ω U+03A9
+    // 3-byte UTF-8
+    if      (b0 == 0xE2 && b1 == 0x84 && b2 == 0xA6) { out += "ohm"; i += 3; } // Ω U+2126
+    // 2-byte UTF-8
+    else if (b0 == 0xCE && b1 == 0xA9)               { out += "ohm"; i += 2; } // Ω U+03A9
     else if (b0 == 0xCE && b1 == 0xBC)               { out += "u";   i += 2; } // μ U+03BC
     else if (b0 == 0xC2 && b1 == 0xB5)               { out += "u";   i += 2; } // µ U+00B5
     else if (b0 == 0xC2 && b1 == 0xB1)               { out += "+/-"; i += 2; } // ± U+00B1
     else if (b0 == 0xC2 && b1 == 0xB0)               { out += "deg"; i += 2; } // ° U+00B0
-    else if (b0 == 0xE2 && b1 == 0x84 && b2 == 0xA6) { out += "ohm"; i += 3; } // Ω U+2126
-    else i += 1; // any other non-ASCII byte: drop it (keeps the field pure ASCII)
+    // 2-byte cp949/EUC-KR (Korean-locale machines)
+    else if (b0 == 0xA5 && b1 == 0xD8)               { out += "ohm"; i += 2; } // Ω
+    else if (b0 == 0xA7 && b1 == 0xD9)               { out += "ohm"; i += 2; } // Ω (ohm sign)
+    else if (b0 == 0xA5 && b1 == 0xEC)               { out += "u";   i += 2; } // µ
+    else if (b0 == 0xA1 && b1 == 0xBE)               { out += "+/-"; i += 2; } // ±
+    else if (b0 == 0xA1 && b1 == 0xC6)               { out += "deg"; i += 2; } // °
+    // 1-byte Latin-1 / Windows-1252 (what Fusion's output() actually writes here)
+    else if (b0 == 0xB5)                             { out += "u";   i += 1; } // µ
+    else if (b0 == 0xB1)                             { out += "+/-"; i += 1; } // ±
+    else if (b0 == 0xB0)                             { out += "deg"; i += 1; } // °
+    // any other non-ASCII byte: drop it (keeps the field pure ASCII)
+    else i += 1;
   }
   return out;
 }
@@ -115,8 +130,9 @@ int isFrame(string dsName, string pkgName) {
 
 void addPart(string mpn, string value, string pkg, string ds, string refdes) {
   totalParts++;
-  value = toAscii(value);   // e.g. "4.7kΩ" -> "4.7kohm", "4.7µF" -> "4.7uF"
-  pkg   = toAscii(pkg);
+  mpn   = toAscii(mpn);     // MPNs are ASCII, but some libraries dump a value/
+  value = toAscii(value);   // description in here — clean it so it can't corrupt.
+  pkg   = toAscii(pkg);     // e.g. "4.7kΩ" -> "4.7kohm", "4.7µF" -> "4.7uF"
 
   string key;
   if (mpn != "") key = "M\t" + mpn;
