@@ -28,6 +28,7 @@ export default function SettingsPage() {
             </button>
           </section>
           <SyncPanel />
+          <UlpPanel />
           <ArucoPanel />
         </div>
       </main>
@@ -287,6 +288,56 @@ function SyncPanel() {
         </div>
       )}
       {msg && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{msg}</p>}
+    </section>
+  );
+}
+
+/** The Fusion/EAGLE ULP scripts, served straight from /public so users can grab
+ *  them here instead of hunting through the repo. Kept in sync with fusion/ulp/. */
+const ULP_FILES: { file: string; title: string; blurb: string }[] = [
+  {
+    file: "extract-board.ulp",
+    title: "extract-board.ulp",
+    blurb: "Board editor → BOM + placements in one .json (import on the Boards page).",
+  },
+  {
+    file: "extract-bom.ulp",
+    title: "extract-bom.ulp",
+    blurb: "Schematic or Board editor → grouped BOM (.json to import, .csv to paste).",
+  },
+  {
+    file: "extract-placements.ulp",
+    title: "extract-placements.ulp",
+    blurb: "Board editor → placements + outline only (feeds the Assembly view).",
+  },
+  {
+    file: "export-library.ulp",
+    title: "export-library.ulp",
+    blurb: "Library editor → library.json for the in-app Library editor round-trip.",
+  },
+];
+
+/** Download links for the Fusion/EAGLE ULP scripts. */
+function UlpPanel() {
+  return (
+    <section className={cardClass}>
+      <h2 className="mb-1 font-medium">Fusion / EAGLE ULP scripts</h2>
+      <p className="mb-3 text-sm text-black/60 dark:text-white/60">
+        Download a script, then in Fusion&rsquo;s Electronics editor run{" "}
+        <code>File → Execute ULP…</code> and pick it (or drop it in your ULP folder). Values are
+        emitted as plain ASCII (e.g. <code>4.7kohm</code>, <code>4.7uF</code>) so symbols survive
+        Excel/CSV round-trips.
+      </p>
+      <ul className="space-y-2 text-sm">
+        {ULP_FILES.map((u) => (
+          <li key={u.file} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <a href={`/ulp/${u.file}`} download className={btn}>
+              {u.title}
+            </a>
+            <span className="text-black/60 dark:text-white/60">{u.blurb}</span>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

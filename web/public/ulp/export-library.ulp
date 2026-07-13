@@ -1,0 +1,64 @@
+#usage "en: <b>Export the open Electronics library to JSON</b> (every deviceset / "
+       "variant / technology / attribute). Run from the <b>Library editor</b>. This is "
+       "phase 1 of the round-trip: export -> edit the JSON -> generate-scr.mjs -> Run "
+       "Script. Read-only; changes nothing.\n"
+
+// JSON-escape a string value (quotes, backslash, control chars).
+string jsonEscape(string s) {
+  string out = "";
+  int n = strlen(s);
+  for (int i = 0; i < n; i++) {
+    string c = strsub(s, i, 1);
+    if      (c == "\"") out += "\\\"";
+    else if (c == "\\") out += "\\\\";
+    else if (c == "\n") out += "\\n";
+    else if (c == "\r") out += "\\r";
+    else if (c == "\t") out += "\\t";
+    else out += c;
+  }
+  return out;
+}
+
+if (!library) {
+  dlgMessageBox("Run this from the Library editor (it reads the open library).");
+  exit(0);
+}
+
+library(L) {
+  string fileName = dlgFileSave("Export library to JSON", "library.json",
+                                "JSON files (*.json);;All files (*)");
+  if (fileName != "") {
+    output(fileName, "wt") {
+      printf("{\n");
+      printf("\"library\": \"%s\",\n", jsonEscape(L.name));
+      printf("\"rows\": [\n");
+      int firstRow = 1;
+      L.devicesets(DS) {
+        DS.devices(D) {
+          string techs[];
+          int nt = strsplit(techs, D.technologies, ' ');
+          if (nt == 0) { techs[0] = ""; nt = 1; }  // single unnamed technology
+          for (int ti = 0; ti < nt; ti++) {
+            string tech = techs[ti];
+            if (!firstRow) printf(",\n");
+            firstRow = 0;
+            printf("  {\"deviceset\": \"%s\", \"variant\": \"%s\", "
+                   "\"package\": \"%s\", \"technology\": \"%s\", \"attributes\": {",
+                   jsonEscape(DS.name), jsonEscape(D.name),
+                   jsonEscape(D.package.name), jsonEscape(tech));
+            int firstAttr = 1;
+            D.attributes(A, tech) {
+              if (!firstAttr) printf(", ");
+              firstAttr = 0;
+              printf("\"%s\": \"%s\"", jsonEscape(A.name), jsonEscape(A.value));
+            }
+            printf("}}");
+          }
+        }
+      }
+      printf("\n]\n}\n");
+    }
+    dlgMessageBox("Exported library to:\n" + fileName +
+                  "\n\nNext: edit the JSON, then run generate-scr.mjs to build apply.scr.");
+  }
+}
