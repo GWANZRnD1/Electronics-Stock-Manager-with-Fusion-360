@@ -1113,11 +1113,14 @@ function BoardCanvas({
     drag.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty, moved: false };
   }
   function onPointerMove(e: React.PointerEvent) {
-    if (!drag.current) return;
-    const dx = e.clientX - drag.current.x;
-    const dy = e.clientY - drag.current.y;
-    if (Math.abs(dx) + Math.abs(dy) > 3) drag.current.moved = true;
-    setView((v) => ({ ...v, tx: drag.current!.tx + dx, ty: drag.current!.ty + dy }));
+    const d = drag.current;
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
+    // Read tx/ty from the captured `d`, not drag.current: the pointer may lift
+    // (nulling drag.current) before this batched updater runs.
+    setView((v) => ({ ...v, tx: d.tx + dx, ty: d.ty + dy }));
   }
   function onPointerUp() {
     drag.current = null;
@@ -1161,7 +1164,7 @@ function BoardCanvas({
 
       <div
         ref={viewportRef}
-        className={`relative aspect-[4/3] w-full overflow-hidden rounded-xl border border-black/10 bg-neutral-100 dark:border-white/15 dark:bg-neutral-900 ${
+        className={`relative aspect-[4/3] w-full touch-none select-none overflow-hidden overscroll-contain rounded-xl border border-black/10 bg-neutral-100 dark:border-white/15 dark:bg-neutral-900 ${
           calibrating ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"
         }`}
         onPointerDown={onPointerDown}
