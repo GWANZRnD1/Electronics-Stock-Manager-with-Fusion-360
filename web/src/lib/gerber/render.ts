@@ -4,11 +4,12 @@
  * space (mm) as the placements from extract-placements.ulp, so the Assembly view
  * can align highlights to the render with no manual calibration.
  *
- * gerber-to-svg negates Y (SVG is y-down, the board is y-up) and scales the
- * viewBox into integer units; we convert that viewBox back to board mm:
+ * gerber-to-svg keeps the plotter's board-coordinate bounds in the viewBox and
+ * flips the rendered layer inside the SVG so it displays with Y pointing down.
+ * The viewBox values themselves must therefore be converted without negating Y:
  *   scale = width_mm / viewBox.width
  *   minX = vx*scale,            maxX = (vx+vw)*scale
- *   maxY = -vy*scale,           minY = -(vy+vh)*scale   (Y is negated)
+ *   minY = vy*scale,            maxY = (vy+vh)*scale
  */
 import { strFromU8, unzipSync } from "fflate";
 import pcbStackup from "pcb-stackup";
@@ -60,21 +61,31 @@ interface StackupSide {
   units: "in" | "mm";
 }
 
-function toSide(side: StackupSide): RenderedSide | undefined {
-  const [vx, vy, vw, vh] = side.viewBox;
-  if (!vw || !vh) return undefined; // this side had no renderable layers
-  const widthMm = side.units === "in" ? side.width * 25.4 : side.width;
+/** Convert gerber-to-svg's integer viewBox bounds back to board millimetres. */
+export function viewBoxToMmBbox(
+  viewBox: readonly number[],
+  width: number,
+  units: "in" | "mm",
+): MmBbox {
+  const [vx, vy, vw, vh] = viewBox;
+  const widthMm = units === "in" ? width * 25.4 : width;
   const scale = widthMm / vw; // mm per viewBox unit (uniform x/y)
+  return {
+    minX: vx * scale,
+    maxX: (vx + vw) * scale,
+    minY: vy * scale,
+    maxY: (vy + vh) * scale,
+  };
+}
+
+function toSide(side: StackupSide): RenderedSide | undefined {
+  const [, , vw, vh] = side.viewBox;
+  if (!vw || !vh) return undefined; // this side had no renderable layers
   return {
     svg: side.svg,
     widthPx: Math.round(vw),
     heightPx: Math.round(vh),
-    mmBbox: {
-      minX: vx * scale,
-      maxX: (vx + vw) * scale,
-      minY: -(vy + vh) * scale,
-      maxY: -vy * scale,
-    },
+    mmBbox: viewBoxToMmBbox(side.viewBox, side.width, side.units),
   };
 }
 
