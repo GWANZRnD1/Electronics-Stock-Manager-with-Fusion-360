@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "
 
 import { Nav } from "@/components/Nav";
 import { Modal, btn, inputClass } from "@/components/ui";
-import { jget, jpatch, jpost } from "@/lib/client";
+import { jget, jpatch, jpost, jupload } from "@/lib/client";
 import { useAltWheelScroll } from "@/lib/useAltWheelScroll";
 
 interface CatalogRow {
@@ -98,7 +98,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [fabOpen, setFabOpen] = useState(false);
-  const [modal, setModal] = useState<"part" | "location" | null>(null);
+  const [modal, setModal] = useState<"part" | "location" | "digikey" | null>(null);
   const [editing, setEditing] = useState<CatalogRow | null>(null);
 
   useEffect(() => {
@@ -159,7 +159,14 @@ export default function Home() {
       <main className="mx-auto w-full max-w-7xl flex-1 p-4 sm:p-6">
         <div className="mb-4 flex items-center justify-between gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">Inventory</h1>
-          <div className="flex items-center gap-1 rounded-lg border border-black/10 p-0.5 text-sm dark:border-white/15">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              className="rounded-md border border-black/15 px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:border-white/20 dark:hover:bg-white/[0.04]"
+              onClick={() => setModal("digikey")}
+            >
+              Import DigiKey order
+            </button>
+            <div className="flex items-center gap-1 rounded-lg border border-black/10 p-0.5 text-sm dark:border-white/15">
             <button
               className={`rounded-md px-3 py-1 ${view === "inventory" ? "bg-blue-600 text-white" : "text-black/60 dark:text-white/60"}`}
               onClick={() => setView("inventory")}
@@ -172,6 +179,7 @@ export default function Home() {
             >
               Summary
             </button>
+            </div>
           </div>
         </div>
 
@@ -265,6 +273,12 @@ export default function Home() {
             setModal(null);
             refresh();
           }}
+        />
+      )}
+      {modal === "digikey" && (
+        <DigikeyImportModal
+          onClose={() => setModal(null)}
+          onImported={refresh}
         />
       )}
     </>
@@ -1027,6 +1041,127 @@ function AddLocationModal({ onClose, onDone }: { onClose: () => void; onDone: ()
           {busy ? "Adding…" : "Add location"}
         </button>
         {msg && <p className="text-sm text-black/70 dark:text-white/70">{msg}</p>}
+      </form>
+    </Modal>
+  );
+}
+
+function DigikeyImportModal({
+  onClose,
+  onImported,
+}: {
+  onClose: () => void;
+  onImported: () => void;
+}) {
+  const [locations, setLocations] = useState<{ id: number; name: string }[]>([]);
+  const [locationId, setLocationId] = useState<number | "">("");
+  const [file, setFile] = useState<File | null>(null);
+  const [orderRef, setOrderRef] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [success, setSuccess] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void jget<{ id: number; name: string }[]>("/api/locations")
+      .then((rows) => {
+        if (active) setLocations(rows);
+      })
+      .catch((error) => {
+        if (active && error instanceof Error && error.message !== "locked") {
+          setMessage(error.message);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function upload(event: React.FormEvent) {
+    event.preventDefault();
+    if (!file || !locationId) return;
+    setBusy(true);
+    setMessage("");
+    setSuccess(false);
+    try {
+      const form = new FormData();
+      form.set("file", file);
+      form.set("locationId", String(locationId));
+      if (orderRef.trim()) form.set("ref", orderRef.trim());
+      const result = await jupload<{
+        partTypes: number;
+        createdParts: number;
+        totalQuantity: number;
+        skippedRows: number;
+      }>("/api/stock/import-digikey", form);
+      setSuccess(true);
+      setMessage(
+        `Received ${result.totalQuantity} item(s) across ${result.partTypes} part type(s); ` +
+          `${result.createdParts} new catalog part(s)` +
+          (result.skippedRows ? `, ${result.skippedRows} blank/zero row(s) skipped.` : "."),
+      );
+      onImported();
+    } catch (error) {
+      if (error instanceof Error && error.message !== "locked") setMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Import DigiKey order" onClose={onClose}>
+      <form onSubmit={upload} className="space-y-3">
+        <p className="text-sm text-black/60 dark:text-white/60">
+          Export an individual order or myLists list as CSV. Quantities are added to the selected
+          stock location and recorded as receive transactions.
+        </p>
+        <input
+          className={inputClass}
+          type="file"
+          accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values"
+          onChange={(event) => {
+            setFile(event.target.files?.[0] ?? null);
+            setMessage("");
+            setSuccess(false);
+          }}
+        />
+        <select
+          className={inputClass}
+          value={locationId}
+          onChange={(event) => setLocationId(event.target.value ? Number(event.target.value) : "")}
+        >
+          <option value="">Receive into location…</option>
+          {locations.map((location) => (
+            <option key={location.id} value={location.id}>
+              {location.name}
+            </option>
+          ))}
+        </select>
+        <input
+          className={inputClass}
+          placeholder="Order/reference number (optional)"
+          value={orderRef}
+          onChange={(event) => setOrderRef(event.target.value)}
+        />
+        {locations.length === 0 && (
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            Add a stock location before importing an order.
+          </p>
+        )}
+        <button className={btn} type="submit" disabled={busy || !file || !locationId}>
+          {busy ? "Importing…" : "Import and receive"}
+        </button>
+        {message && (
+          <p
+            className={`rounded-md px-3 py-2 text-sm ${
+              success
+                ? "bg-green-500/10 text-green-700 dark:text-green-300"
+                : "bg-red-500/10 text-red-600 dark:text-red-400"
+            }`}
+          >
+            {message}
+          </p>
+        )}
       </form>
     </Modal>
   );

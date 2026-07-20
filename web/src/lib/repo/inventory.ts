@@ -10,7 +10,10 @@ import { lookupPart } from "@/lib/distributors";
 import { buildConsumptions, inventoryTxns, locations, parts, stockItems } from "@/lib/db/schema";
 import { bundleCategories, categoryKey } from "@/lib/domain/categories";
 import { deriveField, deriveValue, unitCostFromOffer } from "@/lib/domain/enrich";
+import type { DigikeyOrderItem } from "@/lib/domain/digikeyOrderCsv";
 import type { NormalizedRow } from "@/lib/domain/inventoryCsv";
+import { extractValue } from "@/lib/domain/inventoryCsv";
+import { packageCode } from "@/lib/domain/jellybeanMatch";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -315,6 +318,130 @@ export async function receiveStock(input: {
       .where(and(eq(stockItems.partId, part.id), eq(stockItems.locationId, input.locationId)));
 
     return { part, quantity: updated?.quantity ?? input.quantity };
+  });
+}
+
+export interface DigikeyOrderImportResult {
+  partTypes: number;
+  createdParts: number;
+  stockEntries: number;
+  totalQuantity: number;
+}
+
+function orderCategory(description: string): string {
+  if (/\b(?:RES|RESISTOR)\b/i.test(description)) return "Resistors";
+  if (/\b(?:CAP|CAPACITOR)\b/i.test(description)) return "Capacitors";
+  if (/\b(?:DIODE|RECTIFIER)\b/i.test(description)) return "Diodes";
+  return "";
+}
+
+/**
+ * Add a parsed DigiKey order/list export to an existing inventory location.
+ * Existing catalog rows are reused by MPN or DigiKey SPN and only blank
+ * metadata is backfilled. Every quantity change receives a ledger entry.
+ */
+export async function importDigikeyOrder(
+  items: DigikeyOrderItem[],
+  locationId: number,
+  ref = "",
+  actor = "",
+): Promise<DigikeyOrderImportResult> {
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const mpns = [...new Set(items.map((item) => item.mpn).filter(Boolean))];
+    const spns = [...new Set(items.map((item) => item.spn).filter(Boolean))];
+    const conditions: SQL[] = [];
+    if (mpns.length > 0) conditions.push(inArray(parts.mpn, mpns));
+    if (spns.length > 0) conditions.push(inArray(parts.spn, spns));
+    const existing =
+      conditions.length > 0
+        ? await tx
+            .select()
+            .from(parts)
+            .where(conditions.length === 1 ? conditions[0] : or(...conditions))
+        : [];
+    const byMpn = new Map(existing.map((part) => [part.mpn.toUpperCase(), part]));
+    const bySpn = new Map(
+      existing.filter((part) => part.spn).map((part) => [part.spn.toUpperCase(), part]),
+    );
+
+    let createdParts = 0;
+    for (const item of items) {
+      let part =
+        byMpn.get(item.mpn.toUpperCase()) ||
+        (item.spn ? bySpn.get(item.spn.toUpperCase()) : undefined);
+      const value = extractValue(item.description);
+      const pkg = packageCode(item.description);
+      const category = orderCategory(item.description);
+
+      if (!part) {
+        [part] = await tx
+          .insert(parts)
+          .values({
+            mpn: item.mpn,
+            spn: item.spn,
+            manufacturer: item.manufacturer,
+            description: item.description,
+            supplier: "DigiKey",
+            value,
+            package: pkg,
+            category,
+            unitCost: money(item.unitCost),
+          })
+          .returning();
+        createdParts += 1;
+        byMpn.set(part.mpn.toUpperCase(), part);
+        if (part.spn) bySpn.set(part.spn.toUpperCase(), part);
+      } else {
+        const patch: Partial<typeof parts.$inferInsert> = {};
+        if (!part.spn && item.spn) patch.spn = item.spn;
+        if (!part.manufacturer && item.manufacturer) patch.manufacturer = item.manufacturer;
+        if (!part.description && item.description) patch.description = item.description;
+        if (!part.supplier) patch.supplier = "DigiKey";
+        if (!part.value && value) patch.value = value;
+        if (!part.package && pkg) patch.package = pkg;
+        if (!part.category && category) patch.category = category;
+        if (part.unitCost === null && item.unitCost !== null) patch.unitCost = money(item.unitCost);
+        if (Object.keys(patch).length > 0) {
+          [part] = await tx
+            .update(parts)
+            .set({ ...patch, updatedAt: sql`now()` })
+            .where(eq(parts.id, part.id))
+            .returning();
+        }
+      }
+
+      await tx
+        .insert(stockItems)
+        .values({
+          partId: part.id,
+          locationId,
+          quantity: item.quantity,
+          lastConfirmedAt: sql`now()`,
+        })
+        .onConflictDoUpdate({
+          target: [stockItems.partId, stockItems.locationId],
+          set: {
+            quantity: sql`${stockItems.quantity} + ${item.quantity}`,
+            lastConfirmedAt: sql`now()`,
+          },
+        });
+      await tx.insert(inventoryTxns).values({
+        partId: part.id,
+        locationId,
+        delta: item.quantity,
+        reason: "receive",
+        ref,
+        actor,
+      });
+    }
+
+    return {
+      partTypes: items.length,
+      createdParts,
+      stockEntries: items.length,
+      totalQuantity: items.reduce((sum, item) => sum + item.quantity, 0),
+    };
   });
 }
 

@@ -2,7 +2,8 @@
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { getDb } from "@/lib/db";
-import { bomLines, buildConsumptions, builds, inventoryTxns, parts, stockItems } from "@/lib/db/schema";
+import { buildConsumptions, builds, inventoryTxns, parts, stockItems } from "@/lib/db/schema";
+import { resolveBoardBom } from "@/lib/repo/jellybeans";
 
 export interface ShortageItem {
   mpn: string;
@@ -41,19 +42,44 @@ export async function buildBoard(
   onlyMpns?: string[],
 ) {
   const db = getDb();
-  const lines = await db.select().from(bomLines).where(eq(bomLines.boardId, boardId));
+  const lines = await resolveBoardBom(boardId);
 
   // When a selection is given, only those MPNs are required and consumed; the
   // shortage check below then blocks only on the *selected* parts.
   const only = onlyMpns && onlyMpns.length > 0 ? new Set(onlyMpns) : null;
 
-  const requiredByMpn = new Map<string, number>();
+  const requiredByPart = new Map<number, { mpn: string; required: number }>();
+  const unresolvedRequired = new Map<string, number>();
   let untracked = 0;
   for (const line of lines) {
-    const mpn = (line.partMpn ?? "").trim();
+    const resolved = line.resolvedPart;
+    const mpn = (resolved?.mpn ?? line.partMpn ?? "").trim();
     if (only) {
-      if (mpn && only.has(mpn)) {
-        requiredByMpn.set(mpn, (requiredByMpn.get(mpn) ?? 0) + line.qtyPerBoard * quantity);
+      const selected =
+        (resolved && only.has(resolved.mpn)) ||
+        Boolean(line.partMpn && only.has(line.partMpn));
+      if (selected && resolved) {
+        const current = requiredByPart.get(resolved.id);
+        requiredByPart.set(resolved.id, {
+          mpn: resolved.mpn,
+          required: (current?.required ?? 0) + line.qtyPerBoard * quantity,
+        });
+      } else if (selected && mpn) {
+        unresolvedRequired.set(
+          mpn,
+          (unresolvedRequired.get(mpn) ?? 0) + line.qtyPerBoard * quantity,
+        );
+      }
+      continue;
+    }
+    if (!resolved) {
+      if (mpn) {
+        unresolvedRequired.set(
+          mpn,
+          (unresolvedRequired.get(mpn) ?? 0) + line.qtyPerBoard * quantity,
+        );
+      } else {
+        untracked += 1;
       }
       continue;
     }
@@ -61,15 +87,14 @@ export async function buildBoard(
       untracked += 1;
       continue;
     }
-    requiredByMpn.set(mpn, (requiredByMpn.get(mpn) ?? 0) + line.qtyPerBoard * quantity);
+    const current = requiredByPart.get(resolved.id);
+    requiredByPart.set(resolved.id, {
+      mpn: resolved.mpn,
+      required: (current?.required ?? 0) + line.qtyPerBoard * quantity,
+    });
   }
 
-  const mpns = [...requiredByMpn.keys()];
-  const partRows = mpns.length
-    ? await db.select({ id: parts.id, mpn: parts.mpn }).from(parts).where(inArray(parts.mpn, mpns))
-    : [];
-  const partIdByMpn = new Map(partRows.map((p) => [p.mpn, p.id]));
-  const partIds = partRows.map((p) => p.id);
+  const partIds = [...requiredByPart.keys()];
 
   const stockRows = partIds.length
     ? await db
@@ -84,10 +109,13 @@ export async function buildBoard(
   const availByPart = new Map(stockRows.map((r) => [r.partId, Number(r.available)]));
 
   const shortages: ShortageItem[] = [];
-  for (const [mpn, required] of requiredByMpn) {
-    const pid = partIdByMpn.get(mpn);
-    const available = pid ? (availByPart.get(pid) ?? 0) : 0;
+  for (const [pid, requirement] of requiredByPart) {
+    const { mpn, required } = requirement;
+    const available = availByPart.get(pid) ?? 0;
     if (available < required) shortages.push({ mpn, required, available });
+  }
+  for (const [mpn, required] of unresolvedRequired) {
+    shortages.push({ mpn, required, available: 0 });
   }
   if (shortages.length > 0) throw new BuildShortageError(shortages);
 
@@ -98,12 +126,8 @@ export async function buildBoard(
       .returning();
 
     const consumed: { mpn: string; qty: number }[] = [];
-    for (const [mpn, required] of requiredByMpn) {
-      const pid = partIdByMpn.get(mpn);
-      if (!pid) {
-        untracked += 1;
-        continue;
-      }
+    for (const [pid, requirement] of requiredByPart) {
+      const { mpn, required } = requirement;
       let remaining = required;
       const rows = await tx
         .select()

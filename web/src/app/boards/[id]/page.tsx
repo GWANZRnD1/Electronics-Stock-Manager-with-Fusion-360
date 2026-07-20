@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { Nav } from "@/components/Nav";
 import { jget, jpost, jput } from "@/lib/client";
 import { bomToText, parseBomText } from "@/lib/domain/bomText";
+import { formatDigikeyBulkAdd } from "@/lib/domain/buyLinks";
 
 interface BomRow {
   id: number;
@@ -54,6 +55,34 @@ interface BuildRow {
   completedAt: string | null;
 }
 
+interface PurchaseSelectionRow {
+  partKey: string;
+  reference: string;
+  quantity: number;
+  jellybean: boolean;
+  supplier: "digikey" | "lcsc";
+  chosen: {
+    partNumber: string;
+    mpn: string;
+    manufacturer: string;
+    unitPrice: number;
+    totalPrice: number;
+    stock: number;
+    productUrl: string;
+  };
+  alternative: {
+    partNumber: string;
+    mpn: string;
+    manufacturer: string;
+    unitPrice: number;
+    totalPrice: number;
+    stock: number;
+    productUrl: string;
+  } | null;
+  savingsPercent: number;
+  reason: string;
+}
+
 // Real-MPN shortage keys only (not the synthetic "value|package" / "line-N"
 // used for unmatched lines) — these are the parts that can be consumed/restored.
 function isMpnKey(partKey: string): boolean {
@@ -94,11 +123,12 @@ export default function BoardDetailPage() {
   const [error, setError] = useState("");
   const [savedMsg, setSavedMsg] = useState("");
   const [batchMsg, setBatchMsg] = useState("");
-  // DigiKey bulk-add strings ("part,qty" per line). `raw` shows as soon as the
-  // shortage report loads (jellybeans kept as descriptors); `resolved` is built
-  // on batch click (jellybeans matched to real MPNs where possible).
+  // Purchase lists use quantity,part,reference (blank reference) per line.
+  // Raw shows every shortage; resolved lists are split after live comparison.
   const [rawBatchText, setRawBatchText] = useState("");
   const [resolvedBatchText, setResolvedBatchText] = useState("");
+  const [lcscBatchText, setLcscBatchText] = useState("");
+  const [purchaseSelections, setPurchaseSelections] = useState<PurchaseSelectionRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [buildList, setBuildList] = useState<BuildRow[]>([]);
   const [buildMsg, setBuildMsg] = useState("");
@@ -184,14 +214,22 @@ export default function BoardDetailPage() {
     setError("");
     setBatchMsg("");
     setResolvedBatchText("");
+    setLcscBatchText("");
+    setPurchaseSelections([]);
     try {
       const rep = await jget<ShortageReport>(`/api/boards/${id}/shortage?count=${Number(count) || 0}`);
       const keys = rep.lines.map((l) => l.partKey);
       const prevKeys = new Set((report?.lines ?? []).map((l) => l.partKey));
       setReport(rep);
-      // Raw bulk-add list (DigiKey group, jellybeans as-is) — available immediately.
-      const dkRaw = rep.shortages.filter((l) => l.bucket === "digikey");
-      setRawBatchText(dkRaw.map((l) => `${l.partKey},${l.shortage}`).join("\n"));
+      // Include every shortage rather than only the old DigiKey/jellybean bucket.
+      setRawBatchText(
+        formatDigikeyBulkAdd(
+          rep.shortages.map((line) => ({
+            partNumber: line.partKey,
+            quantity: line.shortage,
+          })),
+        ),
+      );
       // First check: tick everything. Re-check: keep the user's ticks (drop lines
       // that vanished), and tick only lines that are new since the last check — so
       // unticking a part survives a re-check instead of snapping back to all.
@@ -329,69 +367,60 @@ export default function BoardDetailPage() {
 
   async function digikeyBatch() {
     if (!report) return;
-    const dk = report.shortages.filter((s) => s.bucket === "digikey" && s.buyLinks);
-    if (dk.length === 0) {
-      setBatchMsg("No DigiKey-group shortages to batch.");
+    if (report.shortages.length === 0) {
+      setBatchMsg("No shortages to purchase.");
       return;
     }
-    setBatchMsg("Resolving jellybeans on DigiKey…");
+    setBatchMsg("Comparing DigiKey NZ and LCSC stock and pricing…");
     try {
-      // Descriptors (e.g. "2.2 kOhm 0603 (1608 Metric)", with spaces) get resolved
-      // to a real in-stock DigiKey MPN; real MPNs (single token) pass through.
-      const isDescriptor = (key: string) => /\s/.test(key.trim());
-      const jelly = dk.filter((s) => isDescriptor(s.partKey));
+      const plan = await jpost<{
+        selections: PurchaseSelectionRow[];
+        unresolved: { partKey: string; quantity: number; reason: string }[];
+        errors: { partKey: string; distributor: string; message: string }[];
+        digikeyItems: { partNumber: string; quantity: number }[];
+        lcscItems: { partNumber: string; quantity: number }[];
+        digikeyBulkAdd: string;
+        lcscBulkAdd: string;
+      }>("/api/buy/plan", {
+        items: report.shortages.map((shortage) => ({
+          partKey: shortage.partKey,
+          reference: shortage.reference,
+          quantity: shortage.shortage,
+        })),
+      });
+      setResolvedBatchText(plan.digikeyBulkAdd);
+      setLcscBatchText(plan.lcscBulkAdd);
+      setPurchaseSelections(plan.selections);
 
-      const resolvedMap = new Map<string, string>(); // descriptor -> real MPN
-      let unresolved = 0;
-      let rateLimited = 0;
-      if (jelly.length > 0) {
-        const r = await jpost<{
-          resolved: { descriptor: string; mpn: string | null; reason?: string }[];
-        }>("/api/buy/resolve-jellybeans", {
-          items: jelly.map((s) => ({ descriptor: s.partKey, quantity: s.shortage })),
-        });
-        for (const it of r.resolved) {
-          if (it.mpn) resolvedMap.set(it.descriptor, it.mpn);
-          else {
-            unresolved += 1;
-            if (it.reason === "rate_limited") rateLimited += 1;
-          }
+      let opened = false;
+      let openError = "";
+      if (plan.digikeyItems.length > 0) {
+        try {
+          const b = await jpost<{ url: string }>("/api/buy/digikey-batch", {
+            items: plan.digikeyItems,
+          });
+          window.open(b.url, "_blank", "noopener");
+          opened = true;
+        } catch (error) {
+          openError =
+            ` DigiKey MyLists could not be opened (${error instanceof Error ? error.message : "error"}); copy the list below.`;
         }
       }
-
-      // Final list: real MPNs as-is; jellybeans → resolved MPN, or kept AS the
-      // descriptor when unmatched (an unresolved jellybean is never dropped).
-      const items = dk.map((s) => ({
-        partNumber: isDescriptor(s.partKey) ? (resolvedMap.get(s.partKey) ?? s.partKey) : s.partKey,
-        quantity: s.shortage,
-      }));
-      const bulk = items.map((i) => `${i.partNumber},${i.quantity}`).join("\n");
-      setResolvedBatchText(bulk);
-      const copied = await copyToClipboard(bulk);
-
-      const note =
-        unresolved > 0
-          ? ` — ${unresolved} jellybean(s) kept as-is (no DigiKey match` +
-            (rateLimited > 0 ? `; ${rateLimited} rate-limited, retry soon` : "") +
-            ")."
-          : ".";
-
-      try {
-        const b = await jpost<{ url: string }>("/api/buy/digikey-batch", { items });
-        window.open(b.url, "_blank", "noopener");
-        setBatchMsg(
-          `${copied ? "Copied the resolved list and opened" : "Opened"} a DigiKey list (${items.length} part type(s))${note}`,
-        );
-      } catch (e) {
-        // API list failed, but the resolved bulk-add string is still copied/shown.
-        setBatchMsg(
-          `DigiKey list API unavailable (${e instanceof Error ? e.message : "error"}). ` +
-            `The resolved bulk-add list is ${copied ? "copied" : "shown below"} — paste it into DigiKey's “Add Multiple Parts”.${note}`,
-        );
-      }
+      const unresolvedNote =
+        plan.unresolved.length > 0
+          ? ` ${plan.unresolved.length} part type(s) still need manual review.`
+          : "";
+      const errorNote =
+        plan.errors.length > 0
+          ? ` ${plan.errors.length} distributor lookup(s) failed or were rate-limited.`
+          : "";
+      setBatchMsg(
+        `Allocated ${plan.digikeyItems.length} type(s) to DigiKey NZ and ${plan.lcscItems.length} to LCSC` +
+          `${opened ? "; opened the DigiKey list" : ""}.${unresolvedNote}${errorNote}${openError}`,
+      );
     } catch (e) {
       setBatchMsg(
-        `DigiKey batch unavailable (${e instanceof Error ? e.message : "error"}). Use the bulk-add list or per-part links.`,
+        `Purchase comparison unavailable (${e instanceof Error ? e.message : "error"}). Use the raw list or per-part links.`,
       );
     }
   }
@@ -537,6 +566,8 @@ export default function BoardDetailPage() {
               batchMsg={batchMsg}
               rawBatchText={rawBatchText}
               resolvedBatchText={resolvedBatchText}
+              lcscBatchText={lcscBatchText}
+              purchaseSelections={purchaseSelections}
               onCopy={copyText}
             />
           )}
@@ -576,6 +607,8 @@ function ShortageView({
   batchMsg,
   rawBatchText,
   resolvedBatchText,
+  lcscBatchText,
+  purchaseSelections,
   onCopy,
 }: {
   report: ShortageReport;
@@ -586,6 +619,8 @@ function ShortageView({
   batchMsg: string;
   rawBatchText: string;
   resolvedBatchText: string;
+  lcscBatchText: string;
+  purchaseSelections: PurchaseSelectionRow[];
   onCopy: (text: string) => void;
 }) {
   const allChecked = report.lines.length > 0 && report.lines.every((l) => selected.has(l.partKey));
@@ -663,27 +698,81 @@ function ShortageView({
         <div className="mt-6 rounded-lg border border-black/10 p-4 dark:border-white/15">
           <div className="mb-4 flex flex-wrap items-center gap-3">
             <h3 className="font-medium">Buy shortages</h3>
-            {report.shortages.some((s) => s.bucket === "digikey") && (
-              <button
-                className="rounded-md bg-[#cc0000] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#b30000]"
-                onClick={onDigikeyBatch}
-              >
-                DigiKey batch list →
-              </button>
-            )}
+            <button
+              className="rounded-md bg-[#cc0000] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#b30000]"
+              onClick={onDigikeyBatch}
+            >
+              Compare DigiKey NZ + LCSC →
+            </button>
             {batchMsg && <span className="text-sm text-black/60 dark:text-white/60">{batchMsg}</span>}
           </div>
 
           <BulkAddBox
-            label="Bulk-add list — as-is (jellybeans kept as descriptors). Paste into DigiKey “Add Multiple Parts” (part,qty)"
+            label="Raw shortage list — all components (quantity,part,reference). Jellybean descriptors still need resolution."
             text={rawBatchText}
             onCopy={onCopy}
           />
           <BulkAddBox
-            label="Bulk-add list — DigiKey-resolved (jellybeans matched to real MPNs where possible)"
+            label="DigiKey NZ list — resolved and price-selected (quantity,part,reference)"
             text={resolvedBatchText}
             onCopy={onCopy}
           />
+          <BulkAddBox
+            label="LCSC list — resolved and price-selected (quantity,LCSC part,reference)"
+            text={lcscBatchText}
+            onCopy={onCopy}
+          />
+
+          {purchaseSelections.length > 0 && (
+            <div className="mb-4 overflow-x-auto rounded-md border border-black/10 dark:border-white/15">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-black/[0.025] text-black/50 dark:bg-white/[0.04] dark:text-white/50">
+                  <tr>
+                    <th className="px-2 py-1.5 font-medium">BOM part</th>
+                    <th className="px-2 py-1.5 font-medium">Selected</th>
+                    <th className="px-2 py-1.5 text-right font-medium">Qty</th>
+                    <th className="px-2 py-1.5 text-right font-medium">USD/unit</th>
+                    <th className="px-2 py-1.5 font-medium">Comparison</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {purchaseSelections.map((selection) => (
+                    <tr
+                      key={`${selection.partKey}:${selection.supplier}`}
+                      className="border-t border-black/5 dark:border-white/10"
+                    >
+                      <td className="px-2 py-1.5 font-mono">{selection.partKey}</td>
+                      <td className="px-2 py-1.5">
+                        <a
+                          className="text-blue-600 hover:underline dark:text-blue-400"
+                          href={selection.chosen.productUrl || undefined}
+                          target="_blank"
+                          rel="noopener"
+                        >
+                          {selection.supplier === "digikey" ? "DigiKey NZ" : "LCSC"} ·{" "}
+                          {selection.chosen.partNumber}
+                        </a>
+                      </td>
+                      <td className="px-2 py-1.5 text-right tabular-nums">{selection.quantity}</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums">
+                        {selection.chosen.unitPrice > 0
+                          ? `$${selection.chosen.unitPrice.toFixed(4)}`
+                          : "—"}
+                      </td>
+                      <td className="px-2 py-1.5 text-black/55 dark:text-white/55">
+                        {selection.alternative
+                          ? selection.reason === "cheaper_over_threshold"
+                            ? `${selection.savingsPercent.toFixed(1)}% cheaper than preferred`
+                            : `preferred; saving only ${selection.savingsPercent.toFixed(1)}%`
+                          : "only qualified live offer"}
+                        {selection.jellybean ? " · jellybean matched" : ""}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           <div className="space-y-4">
             {BUCKETS.map(({ key, label }) => {

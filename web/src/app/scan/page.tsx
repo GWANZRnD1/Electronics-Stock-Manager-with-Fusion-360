@@ -41,8 +41,8 @@ type ReaderModule = typeof import("zxing-wasm/reader");
 // Request real resolution — a dense LCSC QR needs pixels to resolve its modules.
 const VIDEO_CONSTRAINTS: MediaTrackConstraints = {
   facingMode: { ideal: "environment" },
-  width: { ideal: 1920 },
-  height: { ideal: 1080 },
+  width: { ideal: 2560 },
+  height: { ideal: 1440 },
 };
 // ZXing-C++ (WASM) reader: try hard, both orientations and inverted, one symbol.
 const READER_OPTIONS: ReaderOptions = {
@@ -50,6 +50,8 @@ const READER_OPTIONS: ReaderOptions = {
   tryHarder: true,
   tryRotate: true,
   tryInvert: true,
+  tryDownscale: true,
+  tryDenoise: true,
   maxNumberOfSymbols: 1,
 };
 
@@ -115,6 +117,8 @@ function Sheet({
 export default function ScanPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const frameRef = useRef(0);
   const streamRef = useRef<MediaStream | null>(null);
   const trackRef = useRef<MediaStreamTrack | null>(null);
   const readerRef = useRef<ReaderModule | null>(null);
@@ -280,13 +284,40 @@ export default function ScanPage() {
     return ctx.getImageData(0, 0, w, h);
   }
 
+  /** Upscale the central aiming guide so a small clean code has enough pixels. */
+  function grabCenterCrop(): ImageData | null {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video.videoHeight) return null;
+    const side = Math.floor(Math.min(video.videoWidth, video.videoHeight) * 0.68);
+    const sx = Math.floor((video.videoWidth - side) / 2);
+    const sy = Math.floor((video.videoHeight - side) / 2);
+    const output = Math.max(1200, side);
+    const canvas = (cropCanvasRef.current ??= document.createElement("canvas"));
+    canvas.width = output;
+    canvas.height = output;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(video, sx, sy, side, side, 0, 0, output, output);
+    return ctx.getImageData(0, 0, output, output);
+  }
+
   /** Decode the current video frame with the WASM reader. Returns text or null. */
   async function decodeFrame(): Promise<string | null> {
     const reader = readerRef.current;
     const image = grabFrame();
     if (!reader || !image) return null;
-    const results = await reader.readBarcodes(image, READER_OPTIONS);
-    const hit = results.find((r) => r.bytes?.length || r.text);
+    let hit = (await reader.readBarcodes(image, READER_OPTIONS)).find(
+      (result) => result.bytes?.length || result.text,
+    );
+    frameRef.current += 1;
+    if (!hit && frameRef.current % 3 === 0) {
+      const crop = grabCenterCrop();
+      if (crop) {
+        hit = (await reader.readBarcodes(crop, READER_OPTIONS)).find(
+          (result) => result.bytes?.length || result.text,
+        );
+      }
+    }
     return hit ? decodeScannedBytes(hit.bytes, hit.text) : null;
   }
 

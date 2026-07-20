@@ -6,8 +6,9 @@ import { memo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState
 import type { ReaderOptions } from "zxing-wasm/reader";
 
 import { Nav } from "@/components/Nav";
-import { jget, jput, jupload } from "@/lib/client";
+import { jget, jpost, jput, jupload } from "@/lib/client";
 import { decodeScannedBytes, parseLabel } from "@/lib/domain/barcode";
+import { normalizePartIdentifier as normalizePartIdentifierForDisplay } from "@/lib/domain/jellybeanMatch";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the API shapes)
@@ -27,7 +28,41 @@ interface BomRow {
   spn?: string; // supplier part number, e.g. the DigiKey code
   unitCost?: string | null;
   onHand?: number;
+  resolvedPartId?: number | null;
+  resolvedMpn?: string | null;
+  matchType?: "explicit" | "exact" | "compatible" | "unmatched";
+  matchNotes?: string[];
+  projectQuantity?: number;
+  stockLocations?: {
+    locationId: number;
+    location: string;
+    quantity: number;
+    projectLocation: boolean;
+  }[];
+  alternatives?: {
+    id: number;
+    mpn: string;
+    onHand: number;
+    projectQuantity: number;
+    stockLocations: {
+      locationId: number;
+      location: string;
+      quantity: number;
+      projectLocation: boolean;
+    }[];
+  }[];
 }
+
+type TrackCapabilities = MediaTrackCapabilities & {
+  torch?: boolean;
+  zoom?: { min: number; max: number; step?: number };
+  focusMode?: string[];
+};
+type TrackConstraintSet = MediaTrackConstraintSet & {
+  torch?: boolean;
+  zoom?: number;
+  focusMode?: string;
+};
 
 interface Placement {
   id: number;
@@ -157,12 +192,15 @@ export default function BoardViewPage() {
   // Selection: highlighted designators (uppercase) + a label for the header.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectionLabel, setSelectionLabel] = useState("");
+  const [scanNotes, setScanNotes] = useState<string[]>([]);
   // The BOM line whose detail card is shown (set when a single line is selected).
   const [detailRow, setDetailRow] = useState<BomRow | null>(null);
 
   // Build progress: which BOM lines are populated (persisted per board locally).
   const [populated, setPopulated] = useState<Set<number>>(new Set());
   const [hidePopulated, setHidePopulated] = useState(false);
+  const [consumeMsg, setConsumeMsg] = useState("");
+  const [consuming, setConsuming] = useState(false);
 
   // BOM list controls.
   const [query, setQuery] = useState("");
@@ -311,6 +349,7 @@ export default function BoardViewPage() {
 
   const selectBomRow = useCallback(
     (row: BomRow) => {
+      setScanNotes([]);
       setDetailRow(row);
       selectDesignators(splitDesignators(row.designators), row.partMpn || row.value || "part");
     },
@@ -320,6 +359,7 @@ export default function BoardViewPage() {
   const clearSelection = useCallback(() => {
     setSelected(new Set());
     setSelectionLabel("");
+    setScanNotes([]);
     setDetailRow(null);
   }, []);
 
@@ -333,24 +373,76 @@ export default function BoardViewPage() {
     [designatorToBom, selectBomRow, selectDesignators],
   );
 
-  // Resolve a scanned MPN to designators and highlight them.
-  const highlightByMpn = useCallback(
+  // Fast local exact-MPN path; the stock-aware API below handles real labels
+  // that correspond to a generic resistor/capacitor BOM descriptor.
+  const highlightExactMpn = useCallback(
     (mpn: string) => {
       const m = norm(mpn);
       const rows = bom.filter((r) => r.partMpn && norm(r.partMpn) === m);
       const designators = rows.length
         ? rows.flatMap((r) => splitDesignators(r.designators))
         : bundle.placements.filter((p) => p.mpn && norm(p.mpn) === m).map((p) => p.designator);
-      if (designators.length === 0) {
-        setError(`Scanned ${mpn} — not on this board's BOM.`);
-        return false;
-      }
+      if (designators.length === 0) return false;
       setError("");
+      setScanNotes([]);
       setDetailRow(rows.length === 1 ? rows[0] : null);
       selectDesignators(designators, mpn);
       return true;
     },
     [bom, bundle.placements, selectDesignators],
+  );
+
+  const identifyScan = useCallback(
+    async (raw: string): Promise<boolean> => {
+      try {
+        const label = parseLabel(raw);
+        const identifiers = [
+          label.mpn,
+          label.distributorPart,
+          label.labelFormat === "bare" ? raw : null,
+        ].filter((value): value is string => Boolean(value?.trim()));
+        const display = identifiers[0] ?? raw;
+
+        if (identifiers.some((identifier) => highlightExactMpn(identifier))) return true;
+
+        const result = await jpost<{
+          matches: {
+            lineId: number;
+            designators: string;
+            resolvedMpn: string | null;
+            matchType: "label" | "electrical";
+            matchNotes: string[];
+          }[];
+        }>(`/api/boards/${id}/identify`, { identifiers });
+        if (result.matches.length === 0) {
+          setScanNotes([]);
+          setError(`Scanned ${display} — not on this board's BOM.`);
+          return false;
+        }
+
+        const rowIds = new Set(result.matches.map((match) => match.lineId));
+        const rows = bom.filter((row) => rowIds.has(row.id));
+        const designators = result.matches.flatMap((match) =>
+          splitDesignators(match.designators),
+        );
+        setError("");
+        setDetailRow(rows.length === 1 ? rows[0] : null);
+        const compatible = result.matches.some((match) => match.matchType === "electrical");
+        setScanNotes([
+          ...new Set(result.matches.flatMap((match) => match.matchNotes ?? [])),
+        ]);
+        selectDesignators(
+          designators,
+          compatible ? `${display} · compatible jellybean` : display,
+        );
+        return true;
+      } catch (e) {
+        setScanNotes([]);
+        setError(e instanceof Error ? e.message : "Could not identify that code.");
+        return false;
+      }
+    },
+    [bom, highlightExactMpn, id, selectDesignators],
   );
 
   // --- Image upload -------------------------------------------------------
@@ -512,12 +604,77 @@ export default function BoardViewPage() {
     };
   }, [bom, populated]);
 
+  async function consumeCompletedBoard() {
+    const resolved = [...new Set(bom.map((row) => row.resolvedMpn).filter(Boolean))] as string[];
+    if (resolved.length === 0) {
+      setConsumeMsg("No BOM lines are matched to inventory stock yet.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `Consume stock for one completed ${boardName || "board"}? This will deduct ${resolved.length} matched part type(s).`,
+      )
+    ) {
+      return;
+    }
+
+    setConsuming(true);
+    setConsumeMsg("");
+    try {
+      const response = await fetch(`/api/boards/${id}/build`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ quantity: 1, parts: resolved }),
+      });
+      if (response.status === 401) {
+        window.location.href = "/unlock";
+        return;
+      }
+      const result = (await response.json().catch(() => ({}))) as {
+        consumed?: { mpn: string; qty: number }[];
+        shortages?: { mpn: string; required: number; available: number }[];
+        error?: string;
+      };
+      if (response.status === 409 && result.shortages?.length) {
+        setConsumeMsg(
+          "Not enough stock: " +
+            result.shortages
+              .map((item) => `${item.mpn} (need ${item.required}, have ${item.available})`)
+              .join(", "),
+        );
+        return;
+      }
+      if (!response.ok) throw new Error(result.error ?? "Could not consume stock.");
+
+      const refreshed = await jget<BomRow[]>(`/api/boards/${id}/bom?detail=1`);
+      setBom(refreshed);
+      const cleared = new Set<number>();
+      setPopulated(cleared);
+      savePopulated(String(id), cleared);
+      setConsumeMsg(
+        `Stock consumed for one board (${result.consumed?.length ?? 0} matched part type(s)); progress reset for the next board.`,
+      );
+    } catch (e) {
+      setConsumeMsg(e instanceof Error ? e.message : "Could not consume stock.");
+    } finally {
+      setConsuming(false);
+    }
+  }
+
   // --- BOM list (filter + sort) ------------------------------------------
   const filteredBom = useMemo(() => {
     const q = query.trim().toLowerCase();
     let rows = q
       ? bom.filter((r) =>
-          [r.partMpn ?? "", r.value, r.package, r.designators, r.spn ?? ""].some((f) =>
+          [
+            r.partMpn ?? "",
+            r.resolvedMpn ?? "",
+            r.value,
+            r.package,
+            r.designators,
+            r.spn ?? "",
+            ...(r.stockLocations ?? []).map((location) => location.location),
+          ].some((f) =>
             f.toLowerCase().includes(q),
           ),
         )
@@ -624,13 +781,23 @@ export default function BoardViewPage() {
             </div>
 
             {selectionLabel && (
-              <p className="mb-2 text-sm">
-                <span className="text-black/50 dark:text-white/50">Selected: </span>
-                <span className="font-medium">{selectionLabel}</span>{" "}
-                <button className="text-blue-600 underline dark:text-blue-400" onClick={clearSelection}>
-                  clear
-                </button>
-              </p>
+              <>
+                <p className="mb-2 text-sm">
+                  <span className="text-black/50 dark:text-white/50">Selected: </span>
+                  <span className="font-medium">{selectionLabel}</span>{" "}
+                  <button className="text-blue-600 underline dark:text-blue-400" onClick={clearSelection}>
+                    clear
+                  </button>
+                </p>
+                {scanNotes.length > 0 && (
+                  <div className="mb-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+                    <p className="font-medium">Scanned jellybean reminders</p>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                      {scanNotes.map((note) => <li key={note}>{note}</li>)}
+                    </ul>
+                  </div>
+                )}
+              </>
             )}
 
             <BoardCanvas
@@ -696,6 +863,25 @@ export default function BoardViewPage() {
           <section className="min-w-0">
             {/* Build progress */}
             <ProgressBar progress={progress} />
+            {progress.totalParts > 0 && progress.doneParts === progress.totalParts && (
+              <div className="mb-3 rounded-lg border border-green-500/30 bg-green-500/[0.06] p-3">
+                <button
+                  className="rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-600 disabled:opacity-50"
+                  disabled={consuming}
+                  onClick={() => void consumeCompletedBoard()}
+                >
+                  {consuming ? "Consuming stock…" : "Consume stock for this board"}
+                </button>
+                <p className="mt-1 text-xs text-black/55 dark:text-white/55">
+                  Deducts one board&rsquo;s matched parts from inventory and records a reversible build.
+                </p>
+              </div>
+            )}
+            {consumeMsg && (
+              <p className="mb-3 rounded-md bg-black/[0.04] px-3 py-2 text-sm text-black/70 dark:bg-white/[0.05] dark:text-white/70">
+                {consumeMsg}
+              </p>
+            )}
 
             {/* Selected component detail card */}
             {detailRow && (
@@ -815,7 +1001,22 @@ export default function BoardViewPage() {
                           {row.designators}
                         </td>
                         <td className={`px-2 py-1.5 whitespace-nowrap ${dim}`}>{sideLabel(row)}</td>
-                        <td className={`px-2 py-1.5 font-mono ${dim}`}>{row.partMpn || "—"}</td>
+                        <td className={`px-2 py-1.5 font-mono ${dim}`}>
+                          <span>{row.partMpn || row.resolvedMpn || "—"}</span>
+                          {row.resolvedMpn &&
+                            normalizePartIdentifierForDisplay(row.resolvedMpn) !==
+                              normalizePartIdentifierForDisplay(row.partMpn ?? "") && (
+                              <span className="block text-[10px] text-emerald-700 dark:text-emerald-400">
+                                stock: {row.resolvedMpn}
+                              </span>
+                            )}
+                          {(row.matchNotes?.length ?? 0) > 0 && (
+                            <span className="block text-[10px] text-amber-700 dark:text-amber-400">
+                              review {row.matchNotes?.length} spec reminder
+                              {row.matchNotes?.length === 1 ? "" : "s"}
+                            </span>
+                          )}
+                        </td>
                         <td className={`px-2 py-1.5 ${dim}`}>{row.value}</td>
                         <td className={`px-2 py-1.5 ${dim}`}>{row.package}</td>
                       </tr>
@@ -842,15 +1043,10 @@ export default function BoardViewPage() {
       {scanOpen && (
         <BarcodeScanModal
           onClose={() => setScanOpen(false)}
-          onDetect={(raw) => {
-            try {
-              const label = parseLabel(raw);
-              const mpn = label.mpn || label.distributorPart || raw;
-              const ok = highlightByMpn(mpn);
-              if (ok) setScanOpen(false);
-            } catch {
-              setError("Could not parse that code.");
-            }
+          onDetect={async (raw) => {
+            const ok = await identifyScan(raw);
+            if (ok) setScanOpen(false);
+            return ok;
           }}
         />
       )}
@@ -948,6 +1144,14 @@ function ComponentCard({
         {field("Package", row.package)}
         {field("On hand", row.onHand)}
         {field(
+          row.matchType === "compatible" ? "Compatible stock" : "Inventory match",
+          row.resolvedMpn &&
+            normalizePartIdentifierForDisplay(row.resolvedMpn) !==
+              normalizePartIdentifierForDisplay(row.partMpn ?? "")
+            ? row.resolvedMpn
+            : null,
+        )}
+        {field(
           row.supplier ? `${row.supplier} #` : "Supplier #",
           url ? (
             <a
@@ -965,6 +1169,42 @@ function ComponentCard({
         )}
         {field("Unit cost", cost != null ? `$${cost.toFixed(4)}` : null)}
       </dl>
+
+      {(row.stockLocations?.length ?? 0) > 0 && (
+        <div
+          className={`mt-3 rounded-md px-2.5 py-2 text-xs ${
+            (row.projectQuantity ?? 0) > 0
+              ? "bg-green-500/10 text-green-800 dark:text-green-300"
+              : "bg-amber-500/10 text-amber-800 dark:text-amber-300"
+          }`}
+        >
+          <p className="font-medium">
+            {(row.projectQuantity ?? 0) > 0
+              ? `In project location: ${row.projectQuantity}`
+              : "Not in this project location — pick from:"}
+          </p>
+          <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+            {row.stockLocations?.map((location) => (
+              <li key={location.locationId}>
+                {location.location} <span className="tabular-nums">({location.quantity})</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {(row.stockLocations?.length ?? 0) === 0 && row.resolvedMpn && (
+        <p className="mt-3 rounded-md bg-amber-500/10 px-2.5 py-2 text-xs text-amber-800 dark:text-amber-300">
+          Matched in the catalog, but no stock location currently has this part.
+        </p>
+      )}
+      {(row.matchNotes?.length ?? 0) > 0 && (
+        <div className="mt-3 rounded-md bg-amber-500/10 px-2.5 py-2 text-xs text-amber-900 dark:text-amber-200">
+          <p className="font-medium">Jellybean reminders</p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-4">
+            {row.matchNotes?.map((note) => <li key={note}>{note}</li>)}
+          </ul>
+        </div>
+      )}
 
       <label className="mt-3 flex cursor-pointer select-none items-center gap-2 text-sm">
         <input
@@ -1336,6 +1576,8 @@ const READER_OPTIONS: ReaderOptions = {
   tryHarder: true,
   tryRotate: true,
   tryInvert: true,
+  tryDownscale: true,
+  tryDenoise: true,
   maxNumberOfSymbols: 1,
 };
 
@@ -1344,21 +1586,39 @@ function BarcodeScanModal({
   onDetect,
 }: {
   onClose: () => void;
-  onDetect: (raw: string) => void;
+  onDetect: (raw: string) => Promise<boolean>;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fullCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const trackRef = useRef<MediaStreamTrack | null>(null);
   const readerRef = useRef<typeof import("zxing-wasm/reader") | null>(null);
   const loopRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const runningRef = useRef(false);
+  const onDetectRef = useRef(onDetect);
+  const frameRef = useRef(0);
   const [hint, setHint] = useState("Starting camera…");
+  const [manual, setManual] = useState("");
+  const [capturing, setCapturing] = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+  const [zoomRange, setZoomRange] = useState<{ min: number; max: number; step: number } | null>(null);
+  const [zoom, setZoom] = useState(0);
+
+  useEffect(() => {
+    onDetectRef.current = onDetect;
+  }, [onDetect]);
 
   const stop = useCallback(() => {
     runningRef.current = false;
     if (loopRef.current) clearTimeout(loopRef.current);
+    loopRef.current = null;
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    trackRef.current = null;
+    const video = videoRef.current;
+    if (video) video.srcObject = null;
   }, []);
 
   useEffect(() => {
@@ -1370,7 +1630,11 @@ function BarcodeScanModal({
       }
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 2560 },
+            height: { ideal: 1440 },
+          },
         });
         if (!active) {
           stream.getTracks().forEach((t) => t.stop());
@@ -1380,6 +1644,32 @@ function BarcodeScanModal({
         const video = videoRef.current!;
         video.srcObject = stream;
         await video.play().catch(() => {});
+        const track = stream.getVideoTracks()[0];
+        trackRef.current = track ?? null;
+        const caps = track?.getCapabilities?.() as TrackCapabilities | undefined;
+        setTorchSupported(Boolean(caps?.torch));
+        if (track && caps?.focusMode?.includes("continuous")) {
+          await track
+            .applyConstraints({
+              advanced: [{ focusMode: "continuous" } as TrackConstraintSet],
+            })
+            .catch(() => {});
+        }
+        if (track && caps?.zoom && caps.zoom.max > caps.zoom.min) {
+          const step =
+            caps.zoom.step && caps.zoom.step > 0
+              ? caps.zoom.step
+              : (caps.zoom.max - caps.zoom.min) / 100;
+          const initial = Math.min(
+            caps.zoom.max,
+            caps.zoom.min + (caps.zoom.max - caps.zoom.min) * 0.35,
+          );
+          setZoomRange({ min: caps.zoom.min, max: caps.zoom.max, step });
+          setZoom(initial);
+          await track
+            .applyConstraints({ advanced: [{ zoom: initial } as TrackConstraintSet] })
+            .catch(() => {});
+        }
         const reader = await import("zxing-wasm/reader");
         reader.prepareZXingModule({
           overrides: {
@@ -1390,7 +1680,7 @@ function BarcodeScanModal({
         });
         readerRef.current = reader;
         runningRef.current = true;
-        setHint("Point at the component's QR / DataMatrix label.");
+        setHint("Fill the guide with the QR / DataMatrix and hold steady.");
         void loop();
       } catch {
         setHint("Couldn't open the camera.");
@@ -1403,19 +1693,46 @@ function BarcodeScanModal({
         const reader = readerRef.current;
         const video = videoRef.current;
         if (reader && video && video.videoWidth) {
-          const canvas = (canvasRef.current ??= document.createElement("canvas"));
+          const canvas = (fullCanvasRef.current ??= document.createElement("canvas"));
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
-            ctx.drawImage(video, 0, 0);
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const hit = (await reader.readBarcodes(img, READER_OPTIONS)).find(
+            let hit = (await reader.readBarcodes(img, READER_OPTIONS)).find(
               (r) => r.bytes?.length || r.text,
             );
+            // Every third frame, also upscale the central guide. Tiny, clean QR
+            // codes often fail only because too few camera pixels cover a module.
+            frameRef.current += 1;
+            if (!hit && frameRef.current % 3 === 0) {
+              const side = Math.floor(Math.min(video.videoWidth, video.videoHeight) * 0.72);
+              const sx = Math.floor((video.videoWidth - side) / 2);
+              const sy = Math.floor((video.videoHeight - side) / 2);
+              const crop = (cropCanvasRef.current ??= document.createElement("canvas"));
+              const output = Math.max(1200, side);
+              crop.width = output;
+              crop.height = output;
+              const cropCtx = crop.getContext("2d", { willReadFrequently: true });
+              if (cropCtx) {
+                cropCtx.drawImage(video, sx, sy, side, side, 0, 0, output, output);
+                const cropImage = cropCtx.getImageData(0, 0, output, output);
+                hit = (await reader.readBarcodes(cropImage, READER_OPTIONS)).find(
+                  (result) => result.bytes?.length || result.text,
+                );
+              }
+            }
             if (hit) {
               const raw = decodeScannedBytes(hit.bytes, hit.text);
-              onDetect(raw);
+              runningRef.current = false;
+              setHint("Code read — identifying the part…");
+              const accepted = await onDetectRef.current(raw);
+              if (!accepted && active) {
+                runningRef.current = true;
+                setHint("Code read, but it did not match this BOM. Try another label or enter it below.");
+                loopRef.current = setTimeout(() => void loop(), 900);
+              }
               return;
             }
           }
@@ -1430,7 +1747,81 @@ function BarcodeScanModal({
       active = false;
       stop();
     };
-  }, [onDetect, stop]);
+  }, [stop]);
+
+  async function toggleTorch() {
+    const track = trackRef.current;
+    if (!track) return;
+    const next = !torchOn;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: next } as TrackConstraintSet] });
+      setTorchOn(next);
+    } catch {
+      setHint("This camera could not toggle its light.");
+    }
+  }
+
+  async function changeZoom(value: number) {
+    setZoom(value);
+    await trackRef.current
+      ?.applyConstraints({ advanced: [{ zoom: value } as TrackConstraintSet] })
+      .catch(() => {});
+  }
+
+  async function detectRaw(raw: string) {
+    if (!raw.trim()) return;
+    setHint("Identifying the part…");
+    const accepted = await onDetectRef.current(raw.trim());
+    if (!accepted) setHint("That code did not match this board's BOM.");
+  }
+
+  async function captureDecode() {
+    const reader = readerRef.current;
+    if (!reader || capturing) return;
+    setCapturing(true);
+    setHint("Capturing a sharp photo…");
+    try {
+      let raw = "";
+      const track = trackRef.current;
+      const imageCapture = window as unknown as {
+        ImageCapture?: new (track: MediaStreamTrack) => { takePhoto: () => Promise<Blob> };
+      };
+      if (track && imageCapture.ImageCapture) {
+        try {
+          const blob = await new imageCapture.ImageCapture(track).takePhoto();
+          const hit = (await reader.readBarcodes(blob, READER_OPTIONS)).find(
+            (result) => result.bytes?.length || result.text,
+          );
+          if (hit) raw = decodeScannedBytes(hit.bytes, hit.text);
+        } catch {
+          // Fall back to the current full-resolution video frame below.
+        }
+      }
+      if (!raw) {
+        const video = videoRef.current;
+        if (video?.videoWidth) {
+          const canvas = (fullCanvasRef.current ??= document.createElement("canvas"));
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
+          if (ctx) {
+            const hit = (
+              await reader.readBarcodes(
+                ctx.getImageData(0, 0, canvas.width, canvas.height),
+                READER_OPTIONS,
+              )
+            ).find((result) => result.bytes?.length || result.text);
+            if (hit) raw = decodeScannedBytes(hit.bytes, hit.text);
+          }
+        }
+      }
+      if (raw) await detectRaw(raw);
+      else setHint("No code found. Fill the guide, steady the camera, and try again.");
+    } finally {
+      setCapturing(false);
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" onClick={onClose}>
@@ -1444,10 +1835,51 @@ function BarcodeScanModal({
             ✕
           </button>
         </div>
-        <div className="overflow-hidden rounded-xl border border-black/10 bg-black dark:border-white/15">
+        <div className="relative overflow-hidden rounded-xl border border-black/10 bg-black dark:border-white/15">
           <video ref={videoRef} className="aspect-square w-full object-cover" muted playsInline />
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="h-[72%] w-[72%] rounded-lg border-2 border-white/75 shadow-[0_0_0_9999px_rgba(0,0,0,0.28)]" />
+          </div>
+        </div>
+        {zoomRange && (
+          <label className="mt-3 flex items-center gap-3 text-xs text-black/60 dark:text-white/60">
+            <span>Zoom</span>
+            <input
+              type="range"
+              className="flex-1"
+              min={zoomRange.min}
+              max={zoomRange.max}
+              step={zoomRange.step}
+              value={zoom}
+              onChange={(event) => void changeZoom(Number(event.target.value))}
+            />
+          </label>
+        )}
+        <div className="mt-3 flex gap-2">
+          <button className={`${btn} flex-1`} disabled={capturing} onClick={() => void captureDecode()}>
+            {capturing ? "Reading…" : "Capture sharp photo"}
+          </button>
+          {torchSupported && (
+            <button className={btn} onClick={() => void toggleTorch()}>
+              {torchOn ? "Light off" : "Light on"}
+            </button>
+          )}
         </div>
         <p className="mt-2 text-xs text-black/60 dark:text-white/60">{hint}</p>
+        <div className="mt-3 flex gap-2">
+          <input
+            className="min-w-0 flex-1 rounded-md border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20"
+            placeholder="…or paste/scan label text"
+            value={manual}
+            onChange={(event) => setManual(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void detectRaw(manual);
+            }}
+          />
+          <button className={btn} disabled={!manual.trim()} onClick={() => void detectRaw(manual)}>
+            Identify
+          </button>
+        </div>
       </div>
     </div>
   );

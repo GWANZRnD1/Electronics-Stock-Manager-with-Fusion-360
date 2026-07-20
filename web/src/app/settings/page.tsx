@@ -27,6 +27,7 @@ export default function SettingsPage() {
               Import CSV…
             </button>
           </section>
+          <PurchasingPanel />
           <SyncPanel />
           <UlpPanel />
           <ArucoPanel />
@@ -35,6 +36,147 @@ export default function SettingsPage() {
 
       {importOpen && <ImportModal onClose={() => setImportOpen(false)} onDone={() => setImportOpen(false)} />}
     </>
+  );
+}
+
+interface PurchaseConfig {
+  preferredSupplier: "digikey" | "lcsc";
+  priceDifferenceThresholdPercent: number;
+  normallyStockingOnly: boolean;
+  excludeMarketplace: boolean;
+  inStockOnly: boolean;
+}
+
+function PurchasingPanel() {
+  const [config, setConfig] = useState<PurchaseConfig | null>(null);
+  const [apis, setApis] = useState({ digikey: false, lcsc: false });
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void jget<{ config: PurchaseConfig; apis: { digikey: boolean; lcsc: boolean } }>(
+      "/api/settings/purchasing",
+    )
+      .then((result) => {
+        if (active) {
+          setConfig(result.config);
+          setApis(result.apis);
+        }
+      })
+      .catch((error) => {
+        if (active && error instanceof Error && error.message !== "locked") {
+          setMessage(error.message);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function save() {
+    if (!config) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      const result = await jput<{
+        config: PurchaseConfig;
+        apis: { digikey: boolean; lcsc: boolean };
+      }>("/api/settings/purchasing", config);
+      setConfig(result.config);
+      setApis(result.apis);
+      setMessage("Purchasing settings saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save purchasing settings.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className={cardClass}>
+      <h2 className="mb-1 font-medium">Purchasing comparison</h2>
+      <p className="mb-3 text-sm text-black/60 dark:text-white/60">
+        Build separate DigiKey and LCSC shortage lists. The preferred supplier is retained unless
+        the other live offer is cheaper by at least this threshold. DigiKey searches use the NZ
+        storefront; both APIs are requested in USD for comparison. Shipping, tax, and duties are
+        not included.
+      </p>
+      {!config ? (
+        <p className="text-sm text-black/50 dark:text-white/50">Loading…</p>
+      ) : (
+        <div className="space-y-3 text-sm">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label>
+              <span className="mb-1 block text-black/60 dark:text-white/60">
+                Preferred supplier
+              </span>
+              <select
+                className={inputClass}
+                value={config.preferredSupplier}
+                onChange={(event) =>
+                  setConfig({
+                    ...config,
+                    preferredSupplier: event.target.value as "digikey" | "lcsc",
+                  })
+                }
+              >
+                <option value="digikey">DigiKey</option>
+                <option value="lcsc">LCSC</option>
+              </select>
+            </label>
+            <label>
+              <span className="mb-1 block text-black/60 dark:text-white/60">
+                Switch when cheaper by (%)
+              </span>
+              <input
+                className={inputClass}
+                type="number"
+                min={0}
+                max={100}
+                step={0.1}
+                value={config.priceDifferenceThresholdPercent}
+                onChange={(event) =>
+                  setConfig({
+                    ...config,
+                    priceDifferenceThresholdPercent: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {(
+              [
+                ["normallyStockingOnly", "Normally stocking only"],
+                ["excludeMarketplace", "Exclude marketplace"],
+                ["inStockOnly", "In stock / enough quantity"],
+              ] as const
+            ).map(([key, label]) => (
+              <label key={key} className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={config[key]}
+                  onChange={(event) => setConfig({ ...config, [key]: event.target.checked })}
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-black/50 dark:text-white/50">
+            API status: DigiKey {apis.digikey ? "configured" : "not configured"} · LCSC{" "}
+            {apis.lcsc ? "configured" : "not configured"}. LCSC comparison requires an approved
+            LCSC API key.
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <button className={btn} onClick={save} disabled={saving}>
+              {saving ? "Saving…" : "Save purchasing settings"}
+            </button>
+            {message && <span className="text-sm text-black/60 dark:text-white/60">{message}</span>}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

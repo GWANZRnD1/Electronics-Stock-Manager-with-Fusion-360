@@ -1,5 +1,5 @@
 /** Boards, their BOM lines, and shortage computation (uses the indexed stock sum). */
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 import { getDb } from "@/lib/db";
 import {
@@ -10,9 +10,9 @@ import {
   builds,
   componentPlacements,
   parts,
-  stockItems,
 } from "@/lib/db/schema";
 import { type BomLine, computeShortage, type ShortageReport } from "@/lib/domain/shortage";
+import { resolveBoardBom } from "@/lib/repo/jellybeans";
 
 export function listBoards() {
   return getDb().select().from(boards).orderBy(boards.name);
@@ -195,33 +195,30 @@ export function getBoardBom(boardId: number) {
  * unknown MPN) simply carry empty catalog fields and zero stock.
  */
 export async function getBoardBomDetailed(boardId: number) {
-  const lines = await getBoardBom(boardId);
-  const mpns = [...new Set(lines.map((l) => l.partMpn).filter((m): m is string => Boolean(m)))];
-
-  const catRows = mpns.length
-    ? await getDb()
-        .select({
-          mpn: parts.mpn,
-          manufacturer: parts.manufacturer,
-          supplier: parts.supplier,
-          spn: parts.spn,
-          unitCost: parts.unitCost,
-        })
-        .from(parts)
-        .where(inArray(parts.mpn, mpns))
-    : [];
-  const cat = new Map(catRows.map((r) => [r.mpn, r]));
-  const stock = await stockByMpns(mpns);
-
+  const lines = await resolveBoardBom(boardId);
   return lines.map((l) => {
-    const c = l.partMpn ? cat.get(l.partMpn) : undefined;
+    const c = l.resolvedPart;
     return {
-      ...l,
+      id: l.id,
+      boardId: l.boardId,
+      value: l.value,
+      package: l.package,
+      designators: l.designators,
+      qtyPerBoard: l.qtyPerBoard,
+      partMpn: l.partMpn,
+      matchedPartId: l.matchedPartId,
       manufacturer: c?.manufacturer ?? "",
       supplier: c?.supplier ?? "",
       spn: c?.spn ?? "",
       unitCost: c?.unitCost ?? null,
-      onHand: l.partMpn ? stock[l.partMpn] ?? 0 : 0,
+      onHand: c?.onHand ?? 0,
+      resolvedPartId: c?.id ?? null,
+      resolvedMpn: c?.mpn ?? null,
+      matchType: l.matchType,
+      matchNotes: l.matchNotes,
+      stockLocations: c?.stockLocations ?? [],
+      projectQuantity: c?.projectQuantity ?? 0,
+      alternatives: l.alternatives,
     };
   });
 }
@@ -265,37 +262,24 @@ export async function suppliersByMpns(mpns: string[]): Promise<Record<string, st
   return map;
 }
 
-/** Summed on-hand quantity per MPN (the indexed lookup we benchmarked at ~6ms/50k). */
-async function stockByMpns(mpns: string[]): Promise<Record<string, number>> {
-  if (mpns.length === 0) return {};
-  const rows = await getDb()
-    .select({
-      mpn: parts.mpn,
-      available: sql<number>`COALESCE(SUM(${stockItems.quantity}), 0)`,
-    })
-    .from(parts)
-    .leftJoin(stockItems, eq(stockItems.partId, parts.id))
-    .where(inArray(parts.mpn, mpns))
-    .groupBy(parts.mpn);
-
-  const map: Record<string, number> = {};
-  for (const r of rows) map[r.mpn] = Number(r.available);
-  return map;
-}
-
 export async function getBoardShortage(
   boardId: number,
   boardCount: number,
 ): Promise<ShortageReport> {
-  const lines = await getBoardBom(boardId);
+  const lines = await resolveBoardBom(boardId);
   const bom: BomLine[] = lines.map((l) => ({
     // Key by MPN when present (so it matches stock); otherwise a synthetic key
     // with no stock — i.e. an unmatched part shows as fully short (MPN missing).
-    partKey: l.partMpn || (l.value ? `${l.value}|${l.package}` : `line-${l.id}`),
+    partKey:
+      l.resolvedPart?.mpn ||
+      l.partMpn ||
+      (l.value ? `${l.value}|${l.package}` : `line-${l.id}`),
     qtyPerBoard: l.qtyPerBoard,
     reference: l.designators || l.value || l.partMpn || "",
   }));
-  const mpns = lines.map((l) => l.partMpn).filter((m): m is string => Boolean(m));
-  const stock = await stockByMpns(mpns);
+  const stock: Record<string, number> = {};
+  for (const line of lines) {
+    if (line.resolvedPart) stock[line.resolvedPart.mpn] = line.resolvedPart.onHand;
+  }
   return computeShortage(bom, boardCount, stock);
 }

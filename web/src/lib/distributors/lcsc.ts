@@ -1,10 +1,8 @@
-/**
- * LCSC has no public customer API. `lcscSearch` is a link-only offer (search
- * link, no live data). For a C-number we additionally enrich from EasyEDA's
- * (unofficial) component API, which carries the manufacturer / package the
- * scanned QR omits — see `lcscLookupByCNumber`.
- */
+/** LCSC official partner API plus C-number lookup fallbacks. */
+import { createHash, randomBytes } from "node:crypto";
+
 import { lcscSearchUrl } from "@/lib/domain/buyLinks";
+import { type PartCandidate, unitPriceAtQuantity } from "@/lib/domain/jellybeanQuery";
 
 import type { DistributorOffer } from "./types";
 
@@ -22,8 +20,255 @@ export function lcscSearch(mpn: string): DistributorOffer {
     productUrl: lcscSearchUrl(mpn),
     datasheetUrl: null,
     mock: true,
-    note: "No public API — search link only",
+    note: "LCSC partner API is not configured — search link only",
   };
+}
+
+const LCSC_PARTNER_API = "https://ips.lcsc.com/rest/wmsc2agent";
+const partnerCache = new Map<string, { at: number; rows: PartCandidate[] }>();
+const PARTNER_CACHE_MS = 10 * 60 * 1000;
+
+export function lcscConfigured(): boolean {
+  return Boolean(process.env.LCSC_API_KEY && process.env.LCSC_API_SECRET);
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function textValue(...values: unknown[]): string {
+  return String(values.find((value) => typeof value === "string" && value.trim()) ?? "").trim();
+}
+
+function numberValue(...values: unknown[]): number {
+  const found = values.find(
+    (value) => typeof value === "number" || (typeof value === "string" && value.trim()),
+  );
+  const number = Number(found ?? 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function resultRows(result: unknown): Record<string, unknown>[] {
+  if (Array.isArray(result)) return result.map(record).filter(Boolean) as Record<string, unknown>[];
+  const root = record(result);
+  if (!root) return [];
+  for (const key of [
+    "productList",
+    "ProductList",
+    "products",
+    "Products",
+    "records",
+    "Records",
+    "list",
+    "items",
+    "Items",
+    "content",
+    "data",
+  ]) {
+    const value = root[key];
+    if (Array.isArray(value)) {
+      return value.map(record).filter(Boolean) as Record<string, unknown>[];
+    }
+    const nested = record(value);
+    if (nested) {
+      const rows = resultRows(nested);
+      if (rows.length > 0) return rows;
+    }
+  }
+  return [];
+}
+
+function priceBreaksFrom(row: Record<string, unknown>): { quantity: number; unitPrice: number }[] {
+  const raw =
+    row.productPriceList ??
+    row.ProductPriceList ??
+    row.priceList ??
+    row.PriceList ??
+    row.prices ??
+    row.Prices ??
+    row.productPrices ??
+    [];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(record)
+    .filter(Boolean)
+    .map((price) => ({
+      quantity: numberValue(
+        price!.ladder,
+        price!.Ladder,
+        price!.quantity,
+        price!.Quantity,
+        price!.breakQuantity,
+        price!.BreakQuantity,
+        price!.startNumber,
+        price!.minQuantity,
+      ),
+      unitPrice: numberValue(
+        price!.usdPrice,
+        price!.UsdPrice,
+        price!.unitPrice,
+        price!.UnitPrice,
+        price!.price,
+        price!.Price,
+        price!.productPrice,
+      ),
+    }))
+    .filter((price) => price.quantity > 0 && price.unitPrice > 0)
+    .sort((a, b) => a.quantity - b.quantity);
+}
+
+/**
+ * Official LCSC keyword search. Credentials require LCSC approval; when absent,
+ * callers receive an empty list and can still show ordinary search links.
+ */
+export async function lcscSearchCandidates(
+  keyword: string,
+  options: {
+    quantity?: number;
+    exact?: boolean;
+    inStockOnly?: boolean;
+    excludeMarketplace?: boolean;
+  } = {},
+): Promise<PartCandidate[]> {
+  if (!lcscConfigured()) return [];
+  const quantity = Math.max(1, options.quantity ?? 1);
+  const cacheKey = `${keyword.trim().toLowerCase()}|${options.exact ? "exact" : "fuzzy"}`;
+  const cached = partnerCache.get(cacheKey);
+  let rows: PartCandidate[];
+  if (cached && Date.now() - cached.at < PARTNER_CACHE_MS) {
+    rows = cached.rows;
+  } else {
+    const key = process.env.LCSC_API_KEY!;
+    const secret = process.env.LCSC_API_SECRET!;
+    const nonce = randomBytes(8).toString("hex");
+    // LCSC's documented timestamp is Unix seconds (their example is 10 digits)
+    // and expires after 60 seconds.
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = createHash("sha1")
+      .update(`key=${key}&nonce=${nonce}&secret=${secret}&timestamp=${timestamp}`)
+      .digest("hex");
+    const query = new URLSearchParams({
+      keyword,
+      limit: "30",
+      offset: "0",
+      language: "EN",
+      returnInformation: "All",
+      inStockOnly: "True",
+      currency: "USD",
+    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    let response: Response;
+    try {
+      response = await fetch(`${LCSC_PARTNER_API}/search/product?${query}`, {
+        signal: controller.signal,
+        headers: {
+          Accept: "application/json",
+          key,
+          nonce,
+          timestamp,
+          signature,
+        },
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!response.ok) throw new Error(`LCSC search failed (${response.status})`);
+    const json = (await response.json()) as {
+      success?: boolean;
+      code?: number;
+      message?: string;
+      result?: unknown;
+    };
+    if (json.success === false) {
+      throw new Error(`LCSC search failed (${json.code ?? "error"}): ${json.message ?? ""}`.trim());
+    }
+    rows = resultRows(json.result).flatMap((row) => {
+      const partNumber = textValue(
+        row.productCode,
+        row.ProductCode,
+        row.lcscPartNumber,
+        row.LcscPartNumber,
+        row.lcsc_part_number,
+        row.sku,
+        row.Sku,
+      ).toUpperCase();
+      const mpn = textValue(
+        row.productModel,
+        row.ProductModel,
+        row.mpn,
+        row.Mpn,
+        row.manufacturerPartNumber,
+        row.ManufacturerPartNumber,
+        row.product_model,
+      );
+      if (!partNumber && !mpn) return [];
+      const priceBreaks = priceBreaksFrom(row);
+      return [{
+        partNumber: partNumber || mpn,
+        mpn: mpn || partNumber,
+        manufacturer: textValue(
+          row.brandNameEn,
+          row.BrandNameEn,
+          row.manufacturer,
+          row.Manufacturer,
+          row.brandName,
+        ),
+        packageText: textValue(
+          row.encapStandard,
+          row.EncapStandard,
+          row.package,
+          row.Package,
+          row.packageType,
+        ),
+        description: textValue(
+          row.productIntroEn,
+          row.ProductIntroEn,
+          row.productDescEn,
+          row.ProductDescEn,
+          row.productNameEn,
+          row.ProductNameEn,
+          row.description,
+          row.Description,
+        ),
+        category: textValue(
+          row.catalogName,
+          row.CatalogName,
+          row.parentCatalogName,
+          row.category,
+          row.Category,
+        ),
+        value: textValue(row.value, row.Value, row.productValue),
+        stock: numberValue(
+          row.stockNumber,
+          row.StockNumber,
+          row.stock,
+          row.Stock,
+          row.quantity,
+          row.availableQuantity,
+        ),
+        unitPrice: 0,
+        priceBreaks,
+        normallyStocking: true,
+        marketplace: Boolean(row.otherSupplier ?? row.marketplace),
+        productUrl: productUrl(partNumber || mpn),
+      } satisfies PartCandidate];
+    });
+    partnerCache.set(cacheKey, { at: Date.now(), rows });
+  }
+
+  return rows
+    .filter(
+      (candidate) =>
+        (!options.inStockOnly || candidate.stock >= quantity) &&
+        (!options.excludeMarketplace || !candidate.marketplace),
+    )
+    .map((candidate) => ({
+      ...candidate,
+      unitPrice: unitPriceAtQuantity(candidate.priceBreaks, quantity),
+    }));
 }
 
 const LCSC_LOOKUP_TIMEOUT_MS = 6000;

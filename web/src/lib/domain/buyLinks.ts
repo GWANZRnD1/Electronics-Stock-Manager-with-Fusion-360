@@ -54,6 +54,19 @@ export interface MyListsItem {
   quantities: { quantity: number }[];
 }
 
+/**
+ * DigiKey "Add Multiple Parts" paste format: quantity, part number, customer
+ * reference. The final comma is the intentionally blank reference column.
+ */
+export function formatDigikeyBulkAdd(
+  items: Array<{ partNumber: string; quantity: number }>,
+): string {
+  return items
+    .filter((item) => item.partNumber.trim() && item.quantity > 0)
+    .map((item) => `${Math.trunc(item.quantity)},${item.partNumber.trim()},`)
+    .join("\n");
+}
+
 /** Encode like Python's urllib quote_plus (space -> "+"), for query strings. */
 function quotePlus(value: string): string {
   return encodeURIComponent(value).replace(/%20/g, "+");

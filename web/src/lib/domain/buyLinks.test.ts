@@ -4,6 +4,7 @@ import {
   buyBucket,
   digikeyMylistsPayload,
   digikeySearchUrl,
+  formatDigikeyBulkAdd,
   isJellybeanDescriptor,
   lcscProductUrl,
   lcscSearchUrl,
@@ -52,6 +53,26 @@ describe("buy links", () => {
         ["VALID-ND", 2],
       ]),
     ).toEqual([{ requestedPartNumber: "VALID-ND", quantities: [{ quantity: 2 }] }]);
+  });
+});
+
+describe("formatDigikeyBulkAdd", () => {
+  it("uses quantity, part, blank-reference order", () => {
+    expect(
+      formatDigikeyBulkAdd([
+        { partNumber: " 296-1234-1-ND ", quantity: 7 },
+        { partNumber: "ABC", quantity: 2.9 },
+      ]),
+    ).toBe("7,296-1234-1-ND,\n2,ABC,");
+  });
+
+  it("skips invalid lines", () => {
+    expect(
+      formatDigikeyBulkAdd([
+        { partNumber: "", quantity: 4 },
+        { partNumber: "ABC", quantity: 0 },
+      ]),
+    ).toBe("");
   });
 });
 

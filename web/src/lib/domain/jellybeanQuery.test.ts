@@ -60,11 +60,32 @@ describe("pickCheapestInStock", () => {
     expect(pickCheapestInStock([cand({ stock: 0 })], q)).toBeNull();
   });
 
-  it("falls back to any in-stock part when no package matches", () => {
+  it("does not substitute a known, different package", () => {
     const best = pickCheapestInStock(
       [cand({ mpn: "ONLY", packageText: "nonstandard", unitPrice: 0.03 })],
       q,
     );
-    expect(best?.mpn).toBe("ONLY");
+    expect(best).toBeNull();
+  });
+
+  it("uses the price break available at the required quantity", () => {
+    const best = pickCheapestInStock(
+      [
+        cand({
+          mpn: "CHEAP-ONLY-AT-1000",
+          priceBreaks: [
+            { quantity: 1, unitPrice: 0.2 },
+            { quantity: 1000, unitPrice: 0.001 },
+          ],
+        }),
+        cand({
+          mpn: "ACTUALLY-CHEAP",
+          priceBreaks: [{ quantity: 1, unitPrice: 0.05 }],
+        }),
+      ],
+      q,
+      10,
+    );
+    expect(best?.mpn).toBe("ACTUALLY-CHEAP");
   });
 });

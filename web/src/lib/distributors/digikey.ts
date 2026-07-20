@@ -48,12 +48,41 @@ interface DkProduct {
   Category?: { Name?: string };
   Parameters?: { ParameterText?: string; ValueText?: string }[];
   QuantityAvailable?: number;
+  NormallyStocking?: boolean;
   ProductUrl?: string;
   DatasheetUrl?: string;
   ProductVariations?: {
     DigiKeyProductNumber?: string;
+    QuantityAvailableforPackageType?: number;
+    MinimumOrderQuantity?: number;
+    MarketPlace?: boolean;
     StandardPricing?: { BreakQuantity?: number; UnitPrice?: number }[];
   }[];
+}
+
+function apiHeaders(token: string): Record<string, string> {
+  return {
+    authorization: `Bearer ${token}`,
+    "X-DIGIKEY-Client-Id": process.env.DIGIKEY_CLIENT_ID ?? "",
+    // Product restrictions/availability come from DigiKey New Zealand. USD is
+    // requested so totals are directly comparable with LCSC's USD API prices.
+    "X-DIGIKEY-Locale-Site": "NZ",
+    "X-DIGIKEY-Locale-Language": "en",
+    "X-DIGIKEY-Locale-Currency": "USD",
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+}
+
+function nzProductUrl(url: string | undefined, fallbackPart: string): string {
+  if (!url) return digikeySearchUrl(fallbackPart);
+  try {
+    const parsed = new URL(url);
+    parsed.hostname = "www.digikey.co.nz";
+    return parsed.toString();
+  } catch {
+    return digikeySearchUrl(fallbackPart);
+  }
 }
 
 const PACKAGE_PARAMS = ["package / case", "supplier device package", "package", "case / package"];
@@ -84,13 +113,8 @@ export async function digikeySearch(mpn: string): Promise<DistributorOffer | nul
   const token = await getToken();
   const res = await fetch(`${base()}/products/v4/search/keyword`, {
     method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "X-DIGIKEY-Client-Id": process.env.DIGIKEY_CLIENT_ID ?? "",
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify({ Keywords: mpn, Limit: 5 }),
+    headers: apiHeaders(token),
+    body: JSON.stringify({ Keywords: mpn, Limit: 5, Offset: 0 }),
   });
   if (!res.ok) throw new Error(`DigiKey search failed (${res.status})`);
 
@@ -116,24 +140,13 @@ export async function digikeySearch(mpn: string): Promise<DistributorOffer | nul
     distributorPartNumber: variation?.DigiKeyProductNumber ?? "",
     stock: product.QuantityAvailable ?? 0,
     priceBreaks,
-    productUrl: product.ProductUrl ?? digikeySearchUrl(mpn),
+    productUrl: nzProductUrl(product.ProductUrl, mpn),
     datasheetUrl: product.DatasheetUrl ?? null,
     mock: false,
   };
 }
 
 /** Lowest unit price across all variations/breaks (0 if none priced). */
-function minUnitPrice(product: DkProduct): number {
-  let min = 0;
-  for (const v of product.ProductVariations ?? []) {
-    for (const b of v.StandardPricing ?? []) {
-      const up = b.UnitPrice ?? 0;
-      if (up > 0 && (min === 0 || up < min)) min = up;
-    }
-  }
-  return min;
-}
-
 /**
  * Keyword search returning multiple ranked-by-caller candidates (price + stock +
  * package), used to resolve a generic jellybean descriptor to a real part. Empty
@@ -142,6 +155,12 @@ function minUnitPrice(product: DkProduct): number {
 export async function digikeySearchCandidates(
   keywords: string,
   limit = 10,
+  options: {
+    quantity?: number;
+    inStockOnly?: boolean;
+    excludeMarketplace?: boolean;
+    normallyStockingOnly?: boolean;
+  } = {},
 ): Promise<PartCandidate[]> {
   if (!digikeyConfigured()) return [];
 
@@ -149,13 +168,8 @@ export async function digikeySearchCandidates(
   const doSearch = () =>
     fetch(`${base()}/products/v4/search/keyword`, {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "X-DIGIKEY-Client-Id": process.env.DIGIKEY_CLIENT_ID ?? "",
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      body: JSON.stringify({ Keywords: keywords, Limit: limit }),
+      headers: apiHeaders(token),
+      body: JSON.stringify({ Keywords: keywords, Limit: limit, Offset: 0 }),
     });
 
   // DigiKey burst limit (429) — back off and retry a couple of times (1.5s, 3s).
@@ -167,15 +181,56 @@ export async function digikeySearchCandidates(
   if (!res.ok) throw new Error(`DigiKey search failed (${res.status})`);
 
   const json = (await res.json()) as { Products?: DkProduct[] };
-  return (json.Products ?? [])
-    .map((p) => ({
-      mpn: p.ManufacturerProductNumber ?? "",
-      manufacturer: p.Manufacturer?.Name ?? "",
-      packageText: dkPackage(p.Parameters),
-      stock: p.QuantityAvailable ?? 0,
-      unitPrice: minUnitPrice(p),
-    }))
-    .filter((c) => c.mpn);
+  const quantity = Math.max(1, options.quantity ?? 1);
+  return (json.Products ?? []).flatMap((product) => {
+    if (options.normallyStockingOnly && product.NormallyStocking === false) return [];
+    const variations = (product.ProductVariations ?? []).filter(
+      (variation) => !options.excludeMarketplace || !variation.MarketPlace,
+    );
+    const candidates = variations.map((variation) => {
+      const priceBreaks = (variation.StandardPricing ?? [])
+        .map((price) => ({
+          quantity: price.BreakQuantity ?? 0,
+          unitPrice: price.UnitPrice ?? 0,
+        }))
+        .filter((price) => price.quantity > 0 && price.unitPrice > 0);
+      const applicable = priceBreaks
+        .filter((price) => price.quantity <= quantity)
+        .sort((a, b) => b.quantity - a.quantity)[0];
+      return {
+        partNumber: variation.DigiKeyProductNumber ?? product.ManufacturerProductNumber ?? "",
+        mpn: product.ManufacturerProductNumber ?? "",
+        manufacturer: product.Manufacturer?.Name ?? "",
+        packageText: dkPackage(product.Parameters),
+        description: product.Description?.ProductDescription ?? "",
+        category: product.Category?.Name ?? "",
+        value: dkValue(product.Parameters),
+        stock:
+          variation.QuantityAvailableforPackageType ??
+          product.QuantityAvailable ??
+          0,
+        unitPrice: applicable?.unitPrice ?? 0,
+        priceBreaks,
+        normallyStocking: product.NormallyStocking,
+        marketplace: variation.MarketPlace ?? false,
+        productUrl: nzProductUrl(
+          product.ProductUrl,
+          product.ManufacturerProductNumber ?? keywords,
+        ),
+      } satisfies PartCandidate;
+    });
+    const eligible = candidates.filter(
+      (candidate) =>
+        (!options.inStockOnly || candidate.stock >= quantity) &&
+        candidate.partNumber,
+    );
+    return eligible.sort(
+      (a, b) =>
+        Number(a.unitPrice <= 0) - Number(b.unitPrice <= 0) ||
+        a.unitPrice - b.unitPrice ||
+        b.stock - a.stock,
+    );
+  });
 }
 
 function mockOffer(mpn: string): DistributorOffer {
