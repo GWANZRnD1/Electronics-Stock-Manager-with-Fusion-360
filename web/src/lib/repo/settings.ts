@@ -53,6 +53,10 @@ export interface PurchaseConfig {
   normallyStockingOnly: boolean;
   excludeMarketplace: boolean;
   inStockOnly: boolean;
+  minimumBoardCount: number;
+  bulkOrderQuantities: number[];
+  inexpensiveLineLimitUsd: number;
+  takeNoExtraCostBreaks: boolean;
 }
 
 const PURCHASE_KEY = "purchasing";
@@ -62,6 +66,10 @@ export const DEFAULT_PURCHASE_CONFIG: PurchaseConfig = {
   normallyStockingOnly: true,
   excludeMarketplace: true,
   inStockOnly: true,
+  minimumBoardCount: 3,
+  bulkOrderQuantities: [25, 50, 100],
+  inexpensiveLineLimitUsd: 2,
+  takeNoExtraCostBreaks: true,
 };
 
 /** Purchasing comparison/filter preferences with safe defaults for old DBs. */
@@ -91,6 +99,30 @@ export async function getPurchaseConfig(): Promise<PurchaseConfig> {
         typeof parsed.inStockOnly === "boolean"
           ? parsed.inStockOnly
           : DEFAULT_PURCHASE_CONFIG.inStockOnly,
+      minimumBoardCount:
+        Number.isInteger(parsed.minimumBoardCount) &&
+        parsed.minimumBoardCount! >= 1 &&
+        parsed.minimumBoardCount! <= 100
+          ? parsed.minimumBoardCount!
+          : DEFAULT_PURCHASE_CONFIG.minimumBoardCount,
+      bulkOrderQuantities:
+        Array.isArray(parsed.bulkOrderQuantities) &&
+        parsed.bulkOrderQuantities.length <= 10 &&
+        parsed.bulkOrderQuantities.every(
+          (quantity) => Number.isInteger(quantity) && quantity >= 1 && quantity <= 1_000_000,
+        )
+          ? [...new Set(parsed.bulkOrderQuantities)].sort((a, b) => a - b)
+          : DEFAULT_PURCHASE_CONFIG.bulkOrderQuantities,
+      inexpensiveLineLimitUsd:
+        typeof parsed.inexpensiveLineLimitUsd === "number" &&
+        parsed.inexpensiveLineLimitUsd >= 0 &&
+        parsed.inexpensiveLineLimitUsd <= 10_000
+          ? parsed.inexpensiveLineLimitUsd
+          : DEFAULT_PURCHASE_CONFIG.inexpensiveLineLimitUsd,
+      takeNoExtraCostBreaks:
+        typeof parsed.takeNoExtraCostBreaks === "boolean"
+          ? parsed.takeNoExtraCostBreaks
+          : DEFAULT_PURCHASE_CONFIG.takeNoExtraCostBreaks,
     };
   } catch {
     return DEFAULT_PURCHASE_CONFIG;

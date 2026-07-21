@@ -41,7 +41,7 @@ export default function UnlockPage() {
       >
         <h1 className="text-lg font-semibold">Electronics Stock Manager</h1>
         <p className="mt-1 text-sm text-black/60 dark:text-white/60">
-          Enter the access PIN to continue.
+          Enter your PIN to continue. Your assembly progress stays with your account.
         </p>
         <input
           type="password"
@@ -58,7 +58,7 @@ export default function UnlockPage() {
           disabled={busy || pin.length === 0}
           className="mt-4 w-full rounded-md bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500 disabled:opacity-50"
         >
-          {busy ? "Unlocking…" : "Unlock"}
+          {busy ? "Signing in…" : "Sign in"}
         </button>
       </form>
     </main>

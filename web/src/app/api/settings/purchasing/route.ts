@@ -16,6 +16,10 @@ const schema = z.object({
   normallyStockingOnly: z.boolean(),
   excludeMarketplace: z.boolean(),
   inStockOnly: z.boolean(),
+  minimumBoardCount: z.number().int().min(1).max(100),
+  bulkOrderQuantities: z.array(z.number().int().min(1).max(1_000_000)).max(10),
+  inexpensiveLineLimitUsd: z.number().min(0).max(10_000),
+  takeNoExtraCostBreaks: z.boolean(),
 });
 
 function apiStatus() {

@@ -1,4 +1,4 @@
-import type { PartCandidate } from "./jellybeanQuery";
+import { unitPriceAtQuantity, type PartCandidate } from "./jellybeanQuery";
 
 export type PurchaseSupplier = "digikey" | "lcsc";
 
@@ -17,6 +17,81 @@ export interface SupplierSelection {
 
 function total(candidate: PartCandidate, quantity: number): number {
   return candidate.unitPrice > 0 ? candidate.unitPrice * quantity : Number.POSITIVE_INFINITY;
+}
+
+export interface QuantityRecommendation {
+  minimumQuantity: number;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+  reason: "minimum" | "bulk_under_two_dollars" | "price_break_no_extra_cost";
+}
+
+export interface PurchaseQuantityPolicy {
+  minimumBoardCount: number;
+  bulkOrderQuantities: number[];
+  inexpensiveLineLimitUsd: number;
+  takeNoExtraCostBreaks: boolean;
+}
+
+export const DEFAULT_QUANTITY_POLICY: PurchaseQuantityPolicy = {
+  minimumBoardCount: 3,
+  bulkOrderQuantities: [25, 50, 100],
+  inexpensiveLineLimitUsd: 2,
+  takeNoExtraCostBreaks: true,
+};
+
+/**
+ * Keep a configurable number of boards in reserve, then test the configured
+ * price-break quantities. Larger quantities are accepted only below the cheap
+ * line limit or, when enabled, when they cost no more than the true minimum.
+ */
+export function recommendPurchaseQuantity(
+  candidate: PartCandidate,
+  shortage: number,
+  qtyPerBoard: number,
+  inStockOnly = true,
+  policy: PurchaseQuantityPolicy = DEFAULT_QUANTITY_POLICY,
+): QuantityRecommendation {
+  const minimumQuantity = Math.max(1, shortage, qtyPerBoard * policy.minimumBoardCount);
+  const priceAt = (quantity: number) =>
+    unitPriceAtQuantity(candidate.priceBreaks, quantity) || candidate.unitPrice;
+  const baseUnitPrice = priceAt(minimumQuantity);
+  const baseTotal = baseUnitPrice > 0 ? baseUnitPrice * minimumQuantity : Number.POSITIVE_INFINITY;
+  const options = [minimumQuantity, ...policy.bulkOrderQuantities]
+    .filter((quantity, index, values) => quantity >= minimumQuantity && values.indexOf(quantity) === index)
+    .filter((quantity) => !inStockOnly || candidate.stock >= quantity)
+    .sort((a, b) => a - b);
+
+  let quantity = options[0] ?? minimumQuantity;
+  let unitPrice = priceAt(quantity);
+  let totalPrice = unitPrice > 0 ? unitPrice * quantity : 0;
+  for (const option of options.slice(1)) {
+    const optionUnitPrice = priceAt(option);
+    if (optionUnitPrice <= 0) continue;
+    const optionTotal = optionUnitPrice * option;
+    const underLineLimit = optionTotal <= policy.inexpensiveLineLimitUsd + 0.000001;
+    const noExtraCost =
+      policy.takeNoExtraCostBreaks && optionTotal <= baseTotal + 0.000001;
+    if (underLineLimit || noExtraCost) {
+      quantity = option;
+      unitPrice = optionUnitPrice;
+      totalPrice = optionTotal;
+    }
+  }
+
+  return {
+    minimumQuantity,
+    quantity,
+    unitPrice,
+    totalPrice,
+    reason:
+      quantity === minimumQuantity
+        ? "minimum"
+        : totalPrice <= policy.inexpensiveLineLimitUsd
+          ? "bulk_under_two_dollars"
+          : "price_break_no_extra_cost",
+  };
 }
 
 /** Choose between two already-qualified, sufficiently stocked offers. */

@@ -1,8 +1,17 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --surface: #ffffff;
+  --surface-subtle: #f1f5f9;
+  --muted: #475569;
+  --border: #cbd5e1;
+  --primary: #1d4ed8;
+  --primary-hover: #1e40af;
+  --success: #047857;
+  --warning: #b45309;
+  --danger: #b91c1c;
   /* Render native controls (select dropdowns, scrollbars) to match the theme. */
   color-scheme: light dark;
 }
@@ -16,8 +25,17 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #0b1220;
+    --foreground: #f8fafc;
+    --surface: #111827;
+    --surface-subtle: #1e293b;
+    --muted: #cbd5e1;
+    --border: #334155;
+    --primary: #60a5fa;
+    --primary-hover: #93c5fd;
+    --success: #34d399;
+    --warning: #fbbf24;
+    --danger: #f87171;
     /* Force native controls dark in dark mode — `light dark` alone isn't
        reliably honored by select popups, especially on mobile. */
     color-scheme: dark;
@@ -27,12 +45,36 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+button,
+a,
+input,
+select,
+textarea,
+summary {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--primary) 72%, transparent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+}
+
+@media (max-width: 639px) {
+  body {
+    padding-bottom: 5.25rem;
+  }
 }
 
 /* Native <select> dropdowns don't always follow color-scheme, so paint the
    options with the theme's own colors (dark surface + light text in dark mode). */
 option {
-  background-color: var(--background);
+  background-color: var(--surface);
   color: var(--foreground);
 }

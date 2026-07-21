@@ -15,6 +15,13 @@
       "when": 1779801559451,
       "tag": "0001_boring_black_knight",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784673196718,
+      "tag": "0002_yummy_bucky",
+      "breakpoints": true
     }
   ]
 }

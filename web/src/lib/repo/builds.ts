@@ -2,7 +2,14 @@
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { getDb } from "@/lib/db";
-import { buildConsumptions, builds, inventoryTxns, parts, stockItems } from "@/lib/db/schema";
+import {
+  boardPopulationProgress,
+  buildConsumptions,
+  builds,
+  inventoryTxns,
+  parts,
+  stockItems,
+} from "@/lib/db/schema";
 import { resolveBoardBom } from "@/lib/repo/jellybeans";
 
 export interface ShortageItem {
@@ -40,6 +47,7 @@ export async function buildBoard(
   quantity: number,
   actor: string,
   onlyMpns?: string[],
+  userKey?: string,
 ) {
   const db = getDb();
   const lines = await resolveBoardBom(boardId);
@@ -96,30 +104,34 @@ export async function buildBoard(
 
   const partIds = [...requiredByPart.keys()];
 
-  const stockRows = partIds.length
-    ? await db
-        .select({
-          partId: stockItems.partId,
-          available: sql<number>`COALESCE(SUM(${stockItems.quantity}), 0)`,
-        })
-        .from(stockItems)
-        .where(inArray(stockItems.partId, partIds))
-        .groupBy(stockItems.partId)
-    : [];
-  const availByPart = new Map(stockRows.map((r) => [r.partId, Number(r.available)]));
-
-  const shortages: ShortageItem[] = [];
-  for (const [pid, requirement] of requiredByPart) {
-    const { mpn, required } = requirement;
-    const available = availByPart.get(pid) ?? 0;
-    if (available < required) shortages.push({ mpn, required, available });
-  }
-  for (const [mpn, required] of unresolvedRequired) {
-    shortages.push({ mpn, required, available: 0 });
-  }
-  if (shortages.length > 0) throw new BuildShortageError(shortages);
-
   return db.transaction(async (tx) => {
+    // Stock must be checked only after all relevant rows are locked. Otherwise
+    // two assemblers can both pass a pre-transaction availability check and
+    // consume the same physical units.
+    const lockedStock = partIds.length
+      ? await tx
+          .select()
+          .from(stockItems)
+          .where(inArray(stockItems.partId, partIds))
+          .orderBy(stockItems.id)
+          .for("update")
+      : [];
+    const availByPart = new Map<number, number>();
+    for (const row of lockedStock) {
+      availByPart.set(row.partId, (availByPart.get(row.partId) ?? 0) + row.quantity);
+    }
+    const shortages: ShortageItem[] = [];
+    for (const [pid, requirement] of requiredByPart) {
+      const available = availByPart.get(pid) ?? 0;
+      if (available < requirement.required) {
+        shortages.push({ mpn: requirement.mpn, required: requirement.required, available });
+      }
+    }
+    for (const [mpn, required] of unresolvedRequired) {
+      shortages.push({ mpn, required, available: 0 });
+    }
+    if (shortages.length > 0) throw new BuildShortageError(shortages);
+
     const [build] = await tx
       .insert(builds)
       .values({ boardId, quantity, status: "completed", actor, completedAt: new Date() })
@@ -129,11 +141,9 @@ export async function buildBoard(
     for (const [pid, requirement] of requiredByPart) {
       const { mpn, required } = requirement;
       let remaining = required;
-      const rows = await tx
-        .select()
-        .from(stockItems)
-        .where(and(eq(stockItems.partId, pid), sql`${stockItems.quantity} > 0`))
-        .orderBy(desc(stockItems.quantity));
+      const rows = lockedStock
+        .filter((row) => row.partId === pid && row.quantity > 0)
+        .sort((a, b) => b.quantity - a.quantity || a.id - b.id);
       for (const row of rows) {
         if (remaining <= 0) break;
         const take = Math.min(remaining, row.quantity);
@@ -157,7 +167,17 @@ export async function buildBoard(
       consumed.push({ mpn, qty: required });
     }
 
-    return { build, consumed, untracked };
+    if (userKey) {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userKey}), ${boardId})`);
+      await tx.delete(boardPopulationProgress).where(
+        and(
+          eq(boardPopulationProgress.userKey, userKey),
+          eq(boardPopulationProgress.boardId, boardId),
+        ),
+      );
+    }
+
+    return { build, consumed, untracked, progressReset: Boolean(userKey) };
   });
 }
 

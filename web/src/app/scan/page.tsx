@@ -3,7 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReaderOptions } from "zxing-wasm/reader";
 
+import { DigikeyImportModal } from "@/components/DigikeyImportModal";
 import { Nav } from "@/components/Nav";
+import { Modal, btn, btnSecondary, inputClass } from "@/components/ui";
 import { detectArucoId } from "@/lib/aruco/detect";
 import { type ArucoDictName } from "@/lib/aruco/marker";
 import { jget, jpost } from "@/lib/client";
@@ -72,14 +74,6 @@ function looksLikeMpn(s: string): boolean {
   return t.length > 0 && !/\s/.test(t) && !/[^\x20-\x7e]/.test(t);
 }
 
-const inputClass =
-  "w-full rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20";
-
-/**
- * Mobile-friendly modal: a bottom sheet on phones, a centred dialog on wider
- * screens. Scrolls when the content is taller than the viewport. Backdrop click
- * and ✕ both dismiss.
- */
 function Sheet({
   title,
   onClose,
@@ -89,29 +83,7 @@ function Sheet({
   onClose: () => void;
   children: React.ReactNode;
 }) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4"
-      onClick={onClose}
-    >
-      <div
-        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-t-2xl border border-black/10 bg-[var(--background)] p-5 sm:rounded-2xl dark:border-white/15"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="font-medium">{title}</h2>
-          <button
-            className="text-black/50 hover:text-black dark:text-white/50 dark:hover:text-white"
-            onClick={onClose}
-            aria-label="Close"
-          >
-            ✕
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
+  return <Modal title={title} onClose={onClose}>{children}</Modal>;
 }
 
 export default function ScanPage() {
@@ -151,6 +123,7 @@ export default function ScanPage() {
   const [looking, setLooking] = useState(false);
   const [receiveOpen, setReceiveOpen] = useState(false); // review/receive modal (opens on detect)
   const [locPickerOpen, setLocPickerOpen] = useState(false); // reassign-location modal
+  const [orderImportOpen, setOrderImportOpen] = useState(false);
   const [scanMode, setScanMode] = useState<"component" | "location">("component");
 
   // Refs the running scan loop reads (it closes over the render where it started).
@@ -181,6 +154,8 @@ export default function ScanPage() {
         if (active) {
           setLocations(locs);
           arucoDictRef.current = cfg.dict;
+          const requested = Number(new URLSearchParams(window.location.search).get("location"));
+          if (Number.isInteger(requested) && locs.some((location) => location.id === requested)) setLocationId(requested);
         }
       } catch (e) {
         if (active && e instanceof Error && e.message !== "locked") setError(e.message);
@@ -613,6 +588,25 @@ export default function ScanPage() {
           confirm before it&rsquo;s received.
         </p>
 
+        <section className={`mb-4 rounded-xl border p-4 shadow-sm ${currentLoc ? "border-emerald-400 bg-emerald-50 dark:bg-emerald-500/10" : "border-amber-400 bg-amber-50 dark:bg-amber-500/10"}`}>
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+            <span className={`grid h-6 w-6 place-items-center rounded-full text-white ${currentLoc ? "bg-emerald-700" : "bg-amber-700"}`}>1</span>
+            Destination first
+          </div>
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs text-[var(--muted)]">Receiving into</p>
+              <p className="truncate font-semibold">{currentLoc?.name ?? "Choose a stock location"}</p>
+            </div>
+            <button className={`${btnSecondary} shrink-0`} onClick={() => setLocPickerOpen(true)}>{currentLoc ? "Change" : "Set location"}</button>
+          </div>
+        </section>
+
+        <div className="mb-4 grid gap-2 sm:grid-cols-2">
+          <button className={btnSecondary} onClick={() => setOrderImportOpen(true)}>Import DigiKey order CSV</button>
+          <button className={btnSecondary} onClick={() => setReceiveOpen(true)}>Enter one part manually</button>
+        </div>
+
         {error && (
           <p className="mb-3 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
             {error}
@@ -624,7 +618,11 @@ export default function ScanPage() {
           </p>
         )}
 
-        <div className="relative overflow-hidden rounded-xl border border-black/10 bg-black dark:border-white/15">
+        <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+          <span className="grid h-6 w-6 place-items-center rounded-full bg-blue-700 text-white">2</span>
+          Scan components
+        </div>
+        <div className={scanning ? "relative overflow-hidden rounded-xl border border-[var(--border)] bg-black" : "hidden"}>
           <video ref={videoRef} className="aspect-square w-full object-cover" muted playsInline />
           {scanning && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
@@ -651,10 +649,10 @@ export default function ScanPage() {
             </button>
           ) : (
             <button
-              className="flex-1 rounded-md bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500"
-              onClick={start}
+              className={`${btn} flex-1`}
+              onClick={() => currentLoc ? void start() : setLocPickerOpen(true)}
             >
-              Start camera
+              {currentLoc ? "Start camera" : "Set location to start"}
             </button>
           )}
           {scanning && torchSupported && (
@@ -694,24 +692,6 @@ export default function ScanPage() {
           </div>
         )}
 
-        {/* Current receive location — persists across scans; set/changed via Reassign. */}
-        <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-black/10 px-3 py-2 dark:border-white/15">
-          <div className="min-w-0 text-sm">
-            <span className="text-black/50 dark:text-white/50">Receiving into: </span>
-            {currentLoc ? (
-              <span className="font-medium">{currentLoc.name}</span>
-            ) : (
-              <span className="text-amber-600 dark:text-amber-400">no location set</span>
-            )}
-          </div>
-          <button
-            className="shrink-0 rounded-md border border-black/15 px-3 py-1.5 text-sm hover:bg-black/[0.03] dark:border-white/20 dark:hover:bg-white/[0.04]"
-            onClick={() => setLocPickerOpen(true)}
-          >
-            {currentLoc ? "Reassign" : "Set location"}
-          </button>
-        </div>
-
         <div className="mt-3 flex gap-2">
           <input
             className={inputClass}
@@ -726,13 +706,6 @@ export default function ScanPage() {
             Parse
           </button>
         </div>
-        <button
-          className="mt-2 text-sm text-black/50 underline hover:text-black/80 dark:text-white/50 dark:hover:text-white/80"
-          onClick={() => setReceiveOpen(true)}
-        >
-          Enter receive details manually
-        </button>
-
         {receiveOpen && (
           <Sheet title="Review &amp; receive" onClose={() => setReceiveOpen(false)}>
             <form onSubmit={receive} className="space-y-3">
@@ -887,6 +860,14 @@ export default function ScanPage() {
               </p>
             )}
           </Sheet>
+        )}
+
+        {orderImportOpen && (
+          <DigikeyImportModal
+            initialLocationId={locationId}
+            onClose={() => setOrderImportOpen(false)}
+            onImported={() => setMsg("DigiKey order received into stock. You can continue scanning into the same location.")}
+          />
         )}
       </main>
     </>

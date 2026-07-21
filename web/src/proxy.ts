@@ -5,22 +5,22 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 
-import { GATE_COOKIE, expectedToken } from "@/lib/auth/gate";
+import { GATE_COOKIE, gateEnabled } from "@/lib/auth/gate";
+import { sessionForToken } from "@/lib/auth/session";
 
 // /api/cron and /api/fusion bypass the PIN gate (machine-to-machine); they are
 // protected by CRON_SECRET / FUSION_API_TOKEN respectively.
 const PUBLIC_PATHS = ["/unlock", "/api/unlock", "/api/cron", "/api/fusion"];
 
 export async function proxy(request: NextRequest) {
-  const expected = await expectedToken();
-  if (!expected) return NextResponse.next(); // gate disabled (no ACCESS_PIN)
+  if (!gateEnabled()) return NextResponse.next(); // gate disabled (no ACCESS_PIN)
 
   const { pathname } = request.nextUrl;
   if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return NextResponse.next();
   }
 
-  if (request.cookies.get(GATE_COOKIE)?.value === expected) {
+  if (await sessionForToken(request.cookies.get(GATE_COOKIE)?.value)) {
     return NextResponse.next();
   }
 

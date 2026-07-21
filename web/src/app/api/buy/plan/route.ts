@@ -14,7 +14,7 @@ import {
   type PartCandidate,
   unitPriceAtQuantity,
 } from "@/lib/domain/jellybeanQuery";
-import { chooseSupplier } from "@/lib/domain/purchasePlanning";
+import { chooseSupplier, recommendPurchaseQuantity } from "@/lib/domain/purchasePlanning";
 import { getPurchaseConfig } from "@/lib/repo/settings";
 
 export const runtime = "nodejs";
@@ -27,6 +27,7 @@ const schema = z.object({
         partKey: z.string().trim().min(1).max(256),
         reference: z.string().trim().max(256).optional().default(""),
         quantity: z.number().int().positive().max(1_000_000),
+        qtyPerBoard: z.number().int().positive().max(1_000_000).optional().default(1),
       }),
     )
     .min(1)
@@ -170,6 +171,9 @@ export async function POST(request: Request) {
     partKey: string;
     reference: string;
     quantity: number;
+    requestedQuantity: number;
+    minimumQuantity: number;
+    quantityReason: "minimum" | "bulk_under_two_dollars" | "price_break_no_extra_cost";
     jellybean: boolean;
     supplier: "digikey" | "lcsc";
     chosen: PublicOffer;
@@ -183,18 +187,22 @@ export async function POST(request: Request) {
   // Deliberately sequential across BOM lines to respect both distributors'
   // quotas; each line searches DigiKey and LCSC concurrently.
   for (const item of parsed.data.items) {
+    const minimumQuantity = Math.max(
+      item.quantity,
+      item.qtyPerBoard * config.minimumBoardCount,
+    );
     const descriptor = item.partKey.replace(/\|/g, " ").trim();
     const jellybean = isJellybeanDescriptor(`${descriptor} ${item.reference}`);
     const query = jellybean ? descriptorToQuery(descriptor).keywords : item.partKey;
     const [dkResult, lcscResult] = await Promise.allSettled([
       digikeySearchCandidates(query, 20, {
-        quantity: item.quantity,
+        quantity: minimumQuantity,
         inStockOnly: config.inStockOnly,
         excludeMarketplace: config.excludeMarketplace,
         normallyStockingOnly: config.normallyStockingOnly,
       }),
       lcscSearchCandidates(query, {
-        quantity: item.quantity,
+        quantity: minimumQuantity,
         exact: !jellybean,
         inStockOnly: config.inStockOnly,
         excludeMarketplace: config.excludeMarketplace,
@@ -219,16 +227,16 @@ export async function POST(request: Request) {
     }
 
     const dk = jellybean
-      ? jellybeanBest(descriptor, item.reference, dkCandidates, item.quantity, config.inStockOnly)
-      : exactBest(item.partKey, dkCandidates, item.quantity, config.inStockOnly);
+      ? jellybeanBest(descriptor, item.reference, dkCandidates, minimumQuantity, config.inStockOnly)
+      : exactBest(item.partKey, dkCandidates, minimumQuantity, config.inStockOnly);
     const lcsc = jellybean
-      ? jellybeanBest(descriptor, item.reference, lcscCandidates, item.quantity, config.inStockOnly)
-      : exactBest(item.partKey, lcscCandidates, item.quantity, config.inStockOnly);
-    const selected = chooseSupplier(dk, lcsc, item.quantity, config);
-    if (!selected) {
+      ? jellybeanBest(descriptor, item.reference, lcscCandidates, minimumQuantity, config.inStockOnly)
+      : exactBest(item.partKey, lcscCandidates, minimumQuantity, config.inStockOnly);
+    const preliminary = chooseSupplier(dk, lcsc, minimumQuantity, config);
+    if (!preliminary) {
       unresolved.push({
         partKey: item.partKey,
-        quantity: item.quantity,
+        quantity: minimumQuantity,
         reason:
           dkResult.status === "rejected" || lcscResult.status === "rejected"
             ? "Distributor lookup failed"
@@ -236,15 +244,33 @@ export async function POST(request: Request) {
       });
       continue;
     }
+    const recommendation = recommendPurchaseQuantity(
+      preliminary.chosen,
+      item.quantity,
+      item.qtyPerBoard,
+      config.inStockOnly,
+      config,
+    );
+    const purchaseQuantity = recommendation.quantity;
+    const finalDk = dk && (!config.inStockOnly || dk.stock >= purchaseQuantity)
+      ? prepared(dk, purchaseQuantity)
+      : null;
+    const finalLcsc = lcsc && (!config.inStockOnly || lcsc.stock >= purchaseQuantity)
+      ? prepared(lcsc, purchaseQuantity)
+      : null;
+    const selected = chooseSupplier(finalDk, finalLcsc, purchaseQuantity, config) ?? preliminary;
     selections.push({
       partKey: item.partKey,
       reference: item.reference,
-      quantity: item.quantity,
+      quantity: purchaseQuantity,
+      requestedQuantity: item.quantity,
+      minimumQuantity: recommendation.minimumQuantity,
+      quantityReason: recommendation.reason,
       jellybean,
       supplier: selected.supplier,
-      chosen: publicOffer(selected.chosen, item.quantity),
+      chosen: publicOffer(selected.chosen, purchaseQuantity),
       alternative: selected.alternative
-        ? publicOffer(selected.alternative, item.quantity)
+        ? publicOffer(selected.alternative, purchaseQuantity)
         : null,
       savingsPercent: selected.savingsPercent,
       reason: selected.reason,

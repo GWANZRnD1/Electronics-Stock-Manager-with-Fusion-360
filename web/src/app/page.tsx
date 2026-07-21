@@ -3,9 +3,11 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Nav } from "@/components/Nav";
+import { StockEditorModal } from "@/components/StockEditor";
 import { Modal, btn, inputClass } from "@/components/ui";
-import { jget, jpatch, jpost, jupload } from "@/lib/client";
+import { jdel, jget, jpatch, jpost, jupload } from "@/lib/client";
 import { useAltWheelScroll } from "@/lib/useAltWheelScroll";
+import { stockLocationOrder } from "@/lib/domain/stockRanking";
 
 interface CatalogRow {
   id: number;
@@ -30,6 +32,7 @@ interface StockRow {
   location: string;
   quantity: number;
   lastConfirmedAt: string | null;
+  projectLocation: boolean;
 }
 
 interface SummaryRow {
@@ -157,24 +160,27 @@ export default function Home() {
     <>
       <Nav />
       <main className="mx-auto w-full max-w-7xl flex-1 p-4 sm:p-6">
-        <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="mb-4 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
           <h1 className="text-2xl font-semibold tracking-tight">Inventory</h1>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 sm:justify-end">
+            <button className="min-h-11 rounded-lg bg-blue-700 px-4 py-2 text-sm font-semibold text-white dark:bg-blue-400 dark:text-slate-950" onClick={() => setModal("part")}>
+              + Add part
+            </button>
             <button
-              className="rounded-md border border-black/15 px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:border-white/20 dark:hover:bg-white/[0.04]"
+              className="hidden min-h-11 rounded-lg border border-[var(--border)] px-3 py-2 text-sm font-medium hover:bg-[var(--surface-subtle)] sm:inline-flex sm:items-center"
               onClick={() => setModal("digikey")}
             >
               Import DigiKey order
             </button>
             <div className="flex items-center gap-1 rounded-lg border border-black/10 p-0.5 text-sm dark:border-white/15">
             <button
-              className={`rounded-md px-3 py-1 ${view === "inventory" ? "bg-blue-600 text-white" : "text-black/60 dark:text-white/60"}`}
+              className={`min-h-11 rounded-md px-3 py-2 ${view === "inventory" ? "bg-blue-600 text-white" : "text-black/60 dark:text-white/60"}`}
               onClick={() => setView("inventory")}
             >
               Inventory
             </button>
             <button
-              className={`rounded-md px-3 py-1 ${view === "summary" ? "bg-blue-600 text-white" : "text-black/60 dark:text-white/60"}`}
+              className={`min-h-11 rounded-md px-3 py-2 ${view === "summary" ? "bg-blue-600 text-white" : "text-black/60 dark:text-white/60"}`}
               onClick={() => setView("summary")}
             >
               Summary
@@ -196,9 +202,9 @@ export default function Home() {
               />
             </div>
 
-            <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            <div className="mb-4 flex items-start gap-2">
               <select
-                className={inputClass}
+                className={`${inputClass} max-w-64`}
                 value={filters.category}
                 onChange={(e) => setFilters((f) => ({ ...f, category: e.target.value }))}
               >
@@ -209,11 +215,16 @@ export default function Home() {
                   </option>
                 ))}
               </select>
-              <input className={inputClass} placeholder="Name" value={filters.name} onChange={set("name")} />
-              <input className={inputClass} placeholder="Manufacturer" value={filters.manufacturer} onChange={set("manufacturer")} />
-              <input className={inputClass} placeholder="MPN" value={filters.mpn} onChange={set("mpn")} />
-              <input className={inputClass} placeholder="Size (0603, TH…)" value={filters.package} onChange={set("package")} />
-              <input className={inputClass} placeholder="Location" value={filters.location} onChange={set("location")} />
+              <details className="min-w-32 flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)]">
+                <summary className="flex min-h-11 cursor-pointer list-none items-center px-3 py-2 text-sm font-medium">More filters</summary>
+                <div className="grid grid-cols-1 gap-2 border-t border-[var(--border)] p-3 sm:grid-cols-2 lg:grid-cols-5">
+                  <input className={inputClass} placeholder="Name" value={filters.name} onChange={set("name")} />
+                  <input className={inputClass} placeholder="Manufacturer" value={filters.manufacturer} onChange={set("manufacturer")} />
+                  <input className={inputClass} placeholder="MPN" value={filters.mpn} onChange={set("mpn")} />
+                  <input className={inputClass} placeholder="Size (0603, TH…)" value={filters.package} onChange={set("package")} />
+                  <input className={inputClass} placeholder="Location" value={filters.location} onChange={set("location")} />
+                </div>
+              </details>
             </div>
 
             {error && (
@@ -295,6 +306,7 @@ function InventoryTable({
   onPatched: (id: number, patch: Partial<CatalogRow>) => void;
 }) {
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [stockPart, setStockPart] = useState<CatalogRow | null>(null);
   const [visible, setVisible] = useState(ROWS_PER_PAGE);
   // Render rows incrementally — keeping the DOM small is what makes expand snappy
   // on large result sets. Reset paging/expansion when a new result set arrives
@@ -312,7 +324,37 @@ function InventoryTable({
   const shown = rows.slice(0, visible);
   return (
     <>
-      <div ref={scrollRef} className="overflow-x-auto rounded-xl border border-black/10 dark:border-white/15">
+      <div className="space-y-2 lg:hidden">
+        {shown.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-[var(--border)] bg-[var(--surface)] p-5 text-center text-sm text-[var(--muted)]">
+            No parts. Add a component or import an order to get started.
+          </div>
+        ) : shown.map((row) => (
+          <article key={row.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="break-all font-mono text-sm font-semibold">{row.mpn || row.description || "Unnamed component"}</h2>
+                <p className="mt-1 line-clamp-2 text-sm text-[var(--muted)]">{[row.manufacturer, row.value, row.package].filter(Boolean).join(" · ") || row.category || "No details"}</p>
+              </div>
+              <div className="shrink-0 text-right">
+                <p className="text-2xl font-semibold tabular-nums">{row.totalQuantity}</p>
+                <p className="text-xs text-[var(--muted)]">on hand</p>
+              </div>
+            </div>
+            <p className="mt-2 truncate text-xs text-[var(--muted)]">{row.locations || "No stock location"}</p>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button className="min-h-11 rounded-lg bg-blue-700 px-3 py-2 text-sm font-medium text-white dark:bg-blue-400 dark:text-slate-950" onClick={() => setStockPart(row)}>
+                Count / adjust stock
+              </button>
+              <button className="min-h-11 rounded-lg border border-[var(--border)] px-3 py-2 text-sm font-medium" onClick={() => onEdit(row)}>
+                Edit details
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+
+      <div ref={scrollRef} className="hidden overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] lg:block">
       <table className="w-full min-w-[72rem] text-left text-sm">
         <thead className="text-black/50 dark:text-white/50">
           <tr className="border-b border-black/10 dark:border-white/15">
@@ -322,11 +364,11 @@ function InventoryTable({
             <th className="px-3 py-2 font-medium">SPN</th>
             <th className="px-3 py-2 font-medium">Manufacturer</th>
             <th className="px-3 py-2 font-medium">MPN</th>
+            <th className="px-3 py-2 text-right font-medium">On hand</th>
             <th className="px-3 py-2 font-medium">Description</th>
             <th className="px-3 py-2 font-medium">Value</th>
             <th className="px-3 py-2 text-right font-medium">Unit cost</th>
             <th className="px-3 py-2 text-right font-medium"># Loc</th>
-            <th className="px-3 py-2 text-right font-medium">Total qty</th>
             <th className="px-3 py-2 text-right font-medium">Stock value</th>
             <th className="px-3 py-2" />
           </tr>
@@ -346,6 +388,7 @@ function InventoryTable({
                 expanded={expanded === r.id}
                 onToggle={toggle}
                 onEdit={onEdit}
+                onStock={setStockPart}
                 onPatched={onPatched}
                 colSpan={cols + 1}
               />
@@ -361,18 +404,31 @@ function InventoryTable({
             Showing {shown.length} of {rows.length}
           </span>
           <button
-            className="rounded-md border border-black/15 px-3 py-1.5 font-medium hover:bg-black/5 dark:border-white/20 dark:hover:bg-white/10"
+            className="min-h-11 rounded-lg border border-[var(--border)] px-3 py-2 font-medium hover:bg-[var(--surface-subtle)]"
             onClick={() => setVisible((v) => v + ROWS_PER_PAGE)}
           >
             Show more
           </button>
           <button
-            className="rounded-md px-3 py-1.5 text-black/60 hover:bg-black/5 dark:text-white/60 dark:hover:bg-white/10"
+            className="min-h-11 rounded-lg px-3 py-2 text-[var(--muted)] hover:bg-[var(--surface-subtle)]"
             onClick={() => setVisible(rows.length)}
           >
             Show all
           </button>
         </div>
+      )}
+
+      {stockPart && (
+        <StockEditorModal
+          partId={stockPart.id}
+          partLabel={stockPart.mpn || stockPart.description}
+          onClose={() => setStockPart(null)}
+          onChanged={(stockRows) => onPatched(stockPart.id, {
+            totalQuantity: stockRows.reduce((sum, row) => sum + row.quantity, 0),
+            numLocations: stockRows.filter((row) => row.quantity > 0).length,
+            locations: stockRows.filter((row) => row.quantity > 0).map((row) => row.location).join(", "),
+          })}
+        />
       )}
     </>
   );
@@ -383,6 +439,7 @@ const PartRow = memo(function PartRow({
   expanded,
   onToggle,
   onEdit,
+  onStock,
   onPatched,
   colSpan,
 }: {
@@ -390,6 +447,7 @@ const PartRow = memo(function PartRow({
   expanded: boolean;
   onToggle: (id: number) => void;
   onEdit: (row: CatalogRow) => void;
+  onStock: (row: CatalogRow) => void;
   onPatched: (id: number, patch: Partial<CatalogRow>) => void;
   colSpan: number;
 }) {
@@ -428,6 +486,11 @@ const PartRow = memo(function PartRow({
           onPatched={onPatched}
         />
         <EditableCell partId={row.id} field="mpn" raw={row.mpn} className="px-3 py-2 font-mono" onPatched={onPatched} />
+        <td className="px-3 py-2 text-right">
+          <button className="min-h-9 rounded-lg px-2 font-semibold tabular-nums text-blue-700 hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-500/10" onClick={() => onStock(row)} aria-label={`Manage ${row.totalQuantity} units of ${row.mpn || row.description}`}>
+            {row.totalQuantity}
+          </button>
+        </td>
         <EditableCell
           partId={row.id}
           field="description"
@@ -447,17 +510,15 @@ const PartRow = memo(function PartRow({
           onPatched={onPatched}
         />
         <td className="px-3 py-2 text-right tabular-nums">{row.numLocations}</td>
-        <td className="px-3 py-2 text-right">
-          {row.totalQuantity > 0 ? (
-            <span className="font-medium tabular-nums">{row.totalQuantity}</span>
-          ) : (
-            <span className="rounded bg-black/5 px-2 py-0.5 text-xs text-black/50 dark:bg-white/10 dark:text-white/50">
-              none
-            </span>
-          )}
-        </td>
         <td className="px-3 py-2 text-right tabular-nums">{money(row.stockValue)}</td>
         <td className="px-3 py-2 text-right">
+          <button
+            className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-blue-500/10 dark:text-blue-400"
+            onClick={() => onStock(row)}
+            aria-label={`Manage stock locations for ${row.mpn || row.description}`}
+          >
+            Stock
+          </button>
           <button
             className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-blue-500/10 dark:text-blue-400"
             onClick={() => onEdit(row)}
@@ -645,136 +706,354 @@ function LocationDetail({
 }) {
   // Seed from cache so a re-expand paints immediately; still revalidate below.
   const [stock, setStock] = useState<StockRow[] | null>(() => stockCache.get(partId) ?? null);
-  const [busy, setBusy] = useState<number | null>(null);
-  const [reload, setReload] = useState(0);
+  const [locations, setLocations] = useState<{ id: number; name: string }[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState("");
   const [editLoc, setEditLoc] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
-  const [savingQty, setSavingQty] = useState(false);
   const [qtyErr, setQtyErr] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [addLocationId, setAddLocationId] = useState<number | "">("");
+  const [addQuantity, setAddQuantity] = useState("0");
+  const [moveLoc, setMoveLoc] = useState<number | null>(null);
+  const [moveToId, setMoveToId] = useState<number | "">("");
 
   useEffect(() => {
     let active = true;
-    fetchStock(partId)
-      .then((data) => {
-        if (active) setStock(data);
+    void fetchStock(partId)
+      .then((stockRows) => {
+        if (active) setStock(stockRows);
       })
-      .catch(() => {
-        if (active && !stockCache.has(partId)) setStock([]);
+      .catch((e) => {
+        if (active) {
+          setStock(stockCache.get(partId) ?? []);
+          setError(e instanceof Error && e.message !== "locked" ? e.message : "Unable to load stock.");
+        }
+      });
+    void jget<{ id: number; name: string }[]>("/api/locations")
+      .then((locationRows) => {
+        if (active) setLocations(locationRows);
+      })
+      .catch((e) => {
+        if (active) {
+          setError(e instanceof Error && e.message !== "locked" ? e.message : "Unable to load locations.");
+        }
       });
     return () => {
       active = false;
     };
-  }, [partId, reload]);
+  }, [partId]);
+
+  function applyStock(next: StockRow[]) {
+    const sorted = [...next].sort(stockLocationOrder);
+    stockCache.set(partId, sorted);
+    setStock(sorted);
+    onPatched(partId, {
+      totalQuantity: sorted.reduce((total, row) => total + row.quantity, 0),
+      numLocations: sorted.filter((row) => row.quantity > 0).length,
+    });
+  }
+
+  async function refreshStock() {
+    stockCache.delete(partId);
+    applyStock(await fetchStock(partId));
+  }
 
   async function confirm(locationId: number) {
-    setBusy(locationId);
+    setBusy(`confirm:${locationId}`);
+    setError("");
     try {
       await jpost(`/api/parts/${partId}/confirm`, { locationId });
-      stockCache.delete(partId); // dates changed — force a fresh read
-      setReload((n) => n + 1);
+      await refreshStock();
+    } catch (e) {
+      if (e instanceof Error && e.message !== "locked") setError(e.message);
     } finally {
       setBusy(null);
     }
   }
 
-  function beginQty(e: React.MouseEvent, s: StockRow) {
-    if (!(e.ctrlKey || e.metaKey)) return; // modifier-click only
-    e.preventDefault();
+  function beginQty(s: StockRow) {
     setEditLoc(s.locationId);
     setDraft(String(s.quantity));
     setQtyErr(false);
+    setMoveLoc(null);
+    setError("");
   }
 
   async function commitQty(s: StockRow) {
     const n = Number(draft.trim());
-    if (!Number.isInteger(n) || n < 0) {
+    if (!Number.isInteger(n) || n < 0 || n > 1_000_000) {
       setQtyErr(true);
       return;
     }
-    setSavingQty(true);
+    setBusy(`edit:${s.locationId}`);
     setQtyErr(false);
+    setError("");
     try {
       await jpatch(`/api/parts/${partId}/stock`, { locationId: s.locationId, quantity: n });
       const next = (stock ?? []).map((x) => (x.locationId === s.locationId ? { ...x, quantity: n } : x));
-      stockCache.set(partId, next);
-      setStock(next);
-      // Keep the catalog row's derived totals in sync without a refetch.
-      onPatched(partId, {
-        totalQuantity: next.reduce((a, x) => a + x.quantity, 0),
-        numLocations: next.filter((x) => x.quantity > 0).length,
-      });
+      applyStock(next);
       setEditLoc(null);
-    } catch {
+    } catch (e) {
       setQtyErr(true);
+      if (e instanceof Error && e.message !== "locked") setError(e.message);
     } finally {
-      setSavingQty(false);
+      setBusy(null);
+    }
+  }
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault();
+    const quantity = Number(addQuantity.trim());
+    if (!addLocationId || !Number.isInteger(quantity) || quantity < 0 || quantity > 1_000_000) {
+      setError("Choose a location and enter a whole-number quantity from 0 to 1,000,000.");
+      return;
+    }
+    setBusy("add");
+    setError("");
+    try {
+      await jpost(`/api/parts/${partId}/stock`, { locationId: addLocationId, quantity });
+      await refreshStock();
+      setAdding(false);
+      setAddLocationId("");
+      setAddQuantity("0");
+    } catch (e) {
+      if (e instanceof Error && e.message !== "locked") setError(e.message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function move(s: StockRow) {
+    if (!moveToId) return;
+    setBusy(`move:${s.locationId}`);
+    setError("");
+    try {
+      await jpost(`/api/parts/${partId}/stock/move`, {
+        fromLocationId: s.locationId,
+        toLocationId: moveToId,
+      });
+      await refreshStock();
+      setMoveLoc(null);
+      setMoveToId("");
+    } catch (e) {
+      if (e instanceof Error && e.message !== "locked") setError(e.message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remove(s: StockRow) {
+    const detail =
+      s.quantity === 0
+        ? `Remove this component from "${s.location}"?`
+        : `Remove this component from "${s.location}" and adjust its ${s.quantity} unit${s.quantity === 1 ? "" : "s"} to zero?`;
+    if (!window.confirm(detail)) return;
+    setBusy(`remove:${s.locationId}`);
+    setError("");
+    try {
+      await jdel(`/api/parts/${partId}/stock?locationId=${s.locationId}`);
+      await refreshStock();
+    } catch (e) {
+      if (e instanceof Error && e.message !== "locked") setError(e.message);
+    } finally {
+      setBusy(null);
     }
   }
 
   if (stock === null) return <p className="text-xs text-black/50 dark:text-white/50">Loading…</p>;
-  if (stock.length === 0) return <p className="text-xs text-black/50 dark:text-white/50">No stock in any location.</p>;
+
+  const assignedIds = new Set(stock.map((row) => row.locationId));
+  const unassigned = (locations ?? []).filter((location) => !assignedIds.has(location.id));
+  const actionClass =
+    "rounded px-2 py-1 text-blue-600 hover:bg-blue-500/10 disabled:opacity-40 dark:text-blue-400";
 
   return (
-    <table className="w-full max-w-2xl text-left text-xs">
-      <thead className="text-black/40 dark:text-white/40">
-        <tr>
-          <th className="py-1 pr-4 font-medium">Location</th>
-          <th className="py-1 pr-4 text-right font-medium">Stock</th>
-          <th className="py-1 pr-4 font-medium">Last confirmed</th>
-          <th className="py-1 font-medium" />
-        </tr>
-      </thead>
-      <tbody>
-        {stock.map((s) => (
-          <tr key={s.locationId}>
-            <td className="py-1 pr-4">{s.location}</td>
-            <td className="py-1 pr-4 text-right tabular-nums">
-              {editLoc === s.locationId ? (
-                <input
-                  autoFocus
-                  value={draft}
-                  readOnly={savingQty}
-                  inputMode="numeric"
-                  onFocus={(e) => e.target.select()}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onBlur={() => setEditLoc(null)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void commitQty(s);
-                    } else if (e.key === "Escape") {
-                      e.preventDefault();
-                      setEditLoc(null);
-                    }
-                  }}
-                  className={`w-20 rounded bg-white px-1 py-0.5 text-right text-black outline-none ring-1 dark:bg-neutral-900 dark:text-white ${
-                    qtyErr ? "ring-red-500" : "ring-blue-500"
-                  }`}
-                />
-              ) : (
-                <span
-                  className="cursor-cell rounded px-1 hover:bg-blue-500/10"
-                  title="Ctrl+click to edit"
-                  onClick={(e) => beginQty(e, s)}
-                >
-                  {s.quantity}
-                </span>
-              )}
-            </td>
-            <td className="py-1 pr-4 text-black/60 dark:text-white/60">{fmtDate(s.lastConfirmedAt)}</td>
-            <td className="py-1">
-              <button
-                className="rounded px-2 py-0.5 text-blue-600 hover:bg-blue-500/10 disabled:opacity-50 dark:text-blue-400"
-                onClick={() => confirm(s.locationId)}
-                disabled={busy === s.locationId}
-              >
-                {busy === s.locationId ? "…" : "Confirm"}
-              </button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="max-w-4xl space-y-2 text-xs">
+      {error && (
+        <p className="rounded bg-red-500/10 px-2 py-1.5 text-red-600 dark:text-red-400">{error}</p>
+      )}
+
+      {stock.length === 0 ? (
+        <p className="text-black/50 dark:text-white/50">No location assigned.</p>
+      ) : (
+        <table className="w-full text-left">
+          <thead className="text-black/40 dark:text-white/40">
+            <tr>
+              <th className="py-1 pr-4 font-medium">Location</th>
+              <th className="py-1 pr-4 text-right font-medium">Stock</th>
+              <th className="py-1 pr-4 font-medium">Last confirmed</th>
+              <th className="py-1 text-right font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stock.map((s) => {
+              const moveTargets = (locations ?? []).filter((location) => location.id !== s.locationId);
+              return (
+                <tr key={s.locationId} className="border-t border-black/5 dark:border-white/10">
+                  <td className="py-1.5 pr-4">{s.location}</td>
+                  <td className="py-1.5 pr-4 text-right tabular-nums">
+                    {editLoc === s.locationId ? (
+                      <span className="inline-flex items-center justify-end gap-1">
+                        <input
+                          autoFocus
+                          value={draft}
+                          readOnly={busy !== null}
+                          inputMode="numeric"
+                          onFocus={(e) => e.target.select()}
+                          onChange={(e) => setDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              void commitQty(s);
+                            } else if (e.key === "Escape") {
+                              e.preventDefault();
+                              setEditLoc(null);
+                            }
+                          }}
+                          className={`w-20 rounded bg-white px-1 py-0.5 text-right text-black outline-none ring-1 dark:bg-neutral-900 dark:text-white ${
+                            qtyErr ? "ring-red-500" : "ring-blue-500"
+                          }`}
+                        />
+                        <button className={actionClass} disabled={busy !== null} onClick={() => commitQty(s)}>
+                          Save
+                        </button>
+                        <button className={actionClass} disabled={busy !== null} onClick={() => setEditLoc(null)}>
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      s.quantity
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-4 text-black/60 dark:text-white/60">
+                    {fmtDate(s.lastConfirmedAt)}
+                  </td>
+                  <td className="py-1.5 text-right">
+                    {moveLoc === s.locationId ? (
+                      <span className="inline-flex flex-wrap items-center justify-end gap-1">
+                        <select
+                          autoFocus
+                          className="rounded border border-black/15 bg-transparent px-2 py-1 dark:border-white/20"
+                          value={moveToId}
+                          onChange={(e) => setMoveToId(e.target.value ? Number(e.target.value) : "")}
+                          disabled={busy !== null}
+                        >
+                          <option value="">Move all to…</option>
+                          {moveTargets.map((location) => (
+                            <option key={location.id} value={location.id}>
+                              {location.name}{assignedIds.has(location.id) ? " (merge)" : ""}
+                            </option>
+                          ))}
+                        </select>
+                        <button className={actionClass} disabled={busy !== null || !moveToId} onClick={() => move(s)}>
+                          Move
+                        </button>
+                        <button
+                          className={actionClass}
+                          disabled={busy !== null}
+                          onClick={() => {
+                            setMoveLoc(null);
+                            setMoveToId("");
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      <span className="inline-flex flex-wrap justify-end gap-0.5">
+                        <button className={actionClass} disabled={busy !== null} onClick={() => beginQty(s)}>
+                          Edit qty
+                        </button>
+                        <button
+                          className={actionClass}
+                          disabled={busy !== null || moveTargets.length === 0}
+                          onClick={() => {
+                            setEditLoc(null);
+                            setMoveLoc(s.locationId);
+                            setMoveToId("");
+                          }}
+                        >
+                          Move
+                        </button>
+                        <button className={actionClass} disabled={busy !== null} onClick={() => confirm(s.locationId)}>
+                          {busy === `confirm:${s.locationId}` ? "Confirming…" : "Confirm"}
+                        </button>
+                        <button
+                          className={`${actionClass} text-red-600 dark:text-red-400`}
+                          disabled={busy !== null}
+                          onClick={() => remove(s)}
+                        >
+                          {busy === `remove:${s.locationId}` ? "Removing…" : "Remove"}
+                        </button>
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+
+      {adding ? (
+        <form className="flex flex-wrap items-center gap-2 pt-1" onSubmit={add}>
+          <select
+            autoFocus
+            className="min-w-48 rounded border border-black/15 bg-transparent px-2 py-1.5 dark:border-white/20"
+            value={addLocationId}
+            onChange={(e) => setAddLocationId(e.target.value ? Number(e.target.value) : "")}
+            disabled={busy !== null}
+          >
+            <option value="">Choose location…</option>
+            {unassigned.map((location) => (
+              <option key={location.id} value={location.id}>
+                {location.name}
+              </option>
+            ))}
+          </select>
+          <label className="flex items-center gap-1 text-black/60 dark:text-white/60">
+            Qty
+            <input
+              className="w-24 rounded border border-black/15 bg-transparent px-2 py-1.5 text-right text-black dark:border-white/20 dark:text-white"
+              inputMode="numeric"
+              value={addQuantity}
+              onChange={(e) => setAddQuantity(e.target.value)}
+              disabled={busy !== null}
+            />
+          </label>
+          <button className={actionClass} type="submit" disabled={busy !== null || !addLocationId}>
+            {busy === "add" ? "Adding…" : "Add"}
+          </button>
+          <button className={actionClass} type="button" disabled={busy !== null} onClick={() => setAdding(false)}>
+            Cancel
+          </button>
+        </form>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <button
+            className={actionClass}
+            disabled={busy !== null || locations === null || unassigned.length === 0}
+            onClick={() => {
+              setAdding(true);
+              setEditLoc(null);
+              setMoveLoc(null);
+              setError("");
+            }}
+          >
+            + Add location
+          </button>
+          {locations !== null && unassigned.length === 0 && (
+            <span className="text-black/45 dark:text-white/45">
+              {locations.length === 0 ? "No locations available." : "Assigned to every location."}
+            </span>
+          )}
+          <a className="text-black/50 underline hover:text-black dark:text-white/50 dark:hover:text-white" href="/locations">
+            Manage location names
+          </a>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -860,7 +1139,7 @@ function Fab({
   const label =
     "rounded-md bg-black/80 px-2 py-1 text-xs text-white dark:bg-white/90 dark:text-black";
   return (
-    <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-3">
+    <div className="hidden">
       <div
         className={`flex flex-col items-end gap-3 transition-all duration-200 ${
           open ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-3 opacity-0"

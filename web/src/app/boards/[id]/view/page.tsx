@@ -6,6 +6,7 @@ import { memo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState
 import type { ReaderOptions } from "zxing-wasm/reader";
 
 import { Nav } from "@/components/Nav";
+import { StockEditorModal } from "@/components/StockEditor";
 import { jget, jpost, jput, jupload } from "@/lib/client";
 import { decodeScannedBytes, parseLabel } from "@/lib/domain/barcode";
 import { normalizePartIdentifier as normalizePartIdentifierForDisplay } from "@/lib/domain/jellybeanMatch";
@@ -38,6 +39,7 @@ interface BomRow {
     location: string;
     quantity: number;
     projectLocation: boolean;
+    lastConfirmedAt: string | null;
   }[];
   alternatives?: {
     id: number;
@@ -49,6 +51,7 @@ interface BomRow {
       location: string;
       quantity: number;
       projectLocation: boolean;
+      lastConfirmedAt: string | null;
     }[];
   }[];
 }
@@ -148,6 +151,13 @@ function supplierUrl(supplier: string, spn: string): string | null {
   return null;
 }
 
+function verificationLabel(value: string | null): string {
+  if (!value) return "never verified";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "verification unknown";
+  return `verified ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date)}`;
+}
+
 // Per-board "populated" build progress lives in localStorage (a workshop session
 // state, not catalog data) — keyed by board id, storing the populated BOM line ids.
 const populatedKey = (boardId: string) => `ecsm:populated:${boardId}`;
@@ -160,16 +170,8 @@ function loadPopulated(boardId: string): Set<number> {
     return new Set();
   }
 }
-function savePopulated(boardId: string, ids: Set<number>) {
-  try {
-    window.localStorage.setItem(populatedKey(boardId), JSON.stringify([...ids]));
-  } catch {
-    /* ignore quota / disabled storage */
-  }
-}
-
 const btn =
-  "rounded-md border border-black/15 px-2.5 py-1 text-sm hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/[0.04]";
+  "min-h-11 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm font-medium hover:bg-[var(--surface-subtle)] disabled:opacity-50";
 
 // ===========================================================================
 // Page
@@ -195,9 +197,14 @@ export default function BoardViewPage() {
   const [scanNotes, setScanNotes] = useState<string[]>([]);
   // The BOM line whose detail card is shown (set when a single line is selected).
   const [detailRow, setDetailRow] = useState<BomRow | null>(null);
+  const [stockEditorRow, setStockEditorRow] = useState<BomRow | null>(null);
+  const [mobilePane, setMobilePane] = useState<"board" | "parts">("parts");
 
   // Build progress: which BOM lines are populated (persisted per board locally).
   const [populated, setPopulated] = useState<Set<number>>(new Set());
+  const populatedRef = useRef<Set<number>>(new Set());
+  const progressQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const [progressReady, setProgressReady] = useState(false);
   const [hidePopulated, setHidePopulated] = useState(false);
   const [consumeMsg, setConsumeMsg] = useState("");
   const [consuming, setConsuming] = useState(false);
@@ -222,51 +229,82 @@ export default function BoardViewPage() {
     setImgVersion((v) => v + 1);
   }, [id]);
 
-  // Load this board's saved populated set once on mount (client-only — read from
-  // localStorage after hydration to avoid an SSR/client mismatch).
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setPopulated(loadPopulated(String(id)));
+  const reloadBom = useCallback(async () => {
+    const rows = await jget<BomRow[]>(`/api/boards/${id}/bom?detail=1`);
+    setBom(rows);
+    return rows;
   }, [id]);
 
-  // Toggle a line's populated state and persist.
-  const togglePopulated = useCallback(
-    (rowId: number) => {
-      setPopulated((prev) => {
-        const next = new Set(prev);
-        if (next.has(rowId)) next.delete(rowId);
-        else next.add(rowId);
-        savePopulated(String(id), next);
-        return next;
+  // Load this board's saved populated set once on mount (client-only — read from
+  // localStorage after hydration to avoid an SSR/client mismatch).
+  const applyProgress = useCallback((lineIds: number[]) => {
+    const next = new Set(lineIds);
+    populatedRef.current = next;
+    setPopulated(next);
+  }, []);
+
+  // Requests from this tab stay ordered. The server also serializes writes for
+  // the same user and board across multiple tabs and devices.
+  const persistProgress = useCallback(
+    (lineIds: number[], on: boolean) => {
+      const run = progressQueueRef.current.then(async () => {
+        try {
+          await jput(`/api/boards/${id}/progress`, { lineIds, populated: on });
+        } catch (reason) {
+          const latest = await jget<{ lineIds: number[] }>(`/api/boards/${id}/progress`);
+          applyProgress(latest.lineIds);
+          setConsumeMsg(
+            reason instanceof Error
+              ? `Progress was refreshed after a sync problem: ${reason.message}`
+              : "Progress was refreshed after a sync problem.",
+          );
+        }
       });
+      progressQueueRef.current = run.catch(() => undefined);
     },
-    [id],
+    [applyProgress, id],
   );
 
-  // Mark every (currently visible) line populated, or clear all.
+  const togglePopulated = useCallback(
+    (rowId: number) => {
+      if (!progressReady) return;
+      const next = new Set(populatedRef.current);
+      const on = !next.has(rowId);
+      if (on) next.add(rowId);
+      else next.delete(rowId);
+      populatedRef.current = next;
+      setPopulated(next);
+      persistProgress([rowId], on);
+    },
+    [persistProgress, progressReady],
+  );
+
   const setManyPopulated = useCallback(
     (rowIds: number[], on: boolean) => {
-      setPopulated((prev) => {
-        const next = new Set(prev);
-        for (const rid of rowIds) {
-          if (on) next.add(rid);
-          else next.delete(rid);
-        }
-        savePopulated(String(id), next);
-        return next;
-      });
+      if (!progressReady) return;
+      const next = new Set(populatedRef.current);
+      for (const rowId of rowIds) {
+        if (on) next.add(rowId);
+        else next.delete(rowId);
+      }
+      populatedRef.current = next;
+      setPopulated(next);
+      persistProgress(rowIds, on);
     },
-    [id],
+    [persistProgress, progressReady],
   );
 
   useEffect(() => {
     let active = true;
     void (async () => {
       try {
-        const [boardList, bomRows, b] = await Promise.all([
+        const [boardList, bomRows, b, progress] = await Promise.all([
           jget<{ id: number; name: string; revision: string }[]>("/api/boards"),
           jget<BomRow[]>(`/api/boards/${id}/bom?detail=1`),
           jget<Bundle>(`/api/boards/${id}/placements`),
+          jget<{ lineIds: number[]; user: { name: string; isRoot: boolean } }>(
+            `/api/boards/${id}/progress`,
+          ),
         ]);
         if (!active) return;
         const me = boardList.find((x) => String(x.id) === String(id));
@@ -274,6 +312,23 @@ export default function BoardViewPage() {
         setBoardRev(me?.revision ?? "");
         setBom(bomRows);
         setBundle(b);
+        let progressIds = progress.lineIds;
+        if (progress.user.isRoot) {
+          const validIds = new Set(bomRows.map((row) => row.id));
+          const legacyIds = [...loadPopulated(String(id))].filter((lineId) => validIds.has(lineId));
+          const missing = legacyIds.filter((lineId) => !progressIds.includes(lineId));
+          if (missing.length > 0) {
+            const imported = await jput<{ lineIds: number[] }>(`/api/boards/${id}/progress`, {
+              lineIds: missing,
+              populated: true,
+            });
+            progressIds = imported.lineIds;
+          }
+          window.localStorage.removeItem(populatedKey(String(id)));
+        }
+        if (!active) return;
+        applyProgress(progressIds);
+        setProgressReady(true);
         // Default to whichever side has an image / placements.
         if (!b.images.some((im) => im.side === "top") && b.images.some((im) => im.side === "bottom")) {
           setSide("bottom");
@@ -285,7 +340,7 @@ export default function BoardViewPage() {
     return () => {
       active = false;
     };
-  }, [id]);
+  }, [applyProgress, id]);
 
   // designator (uppercase) -> the BOM row that lists it.
   const designatorToBom = useMemo(() => {
@@ -351,6 +406,7 @@ export default function BoardViewPage() {
     (row: BomRow) => {
       setScanNotes([]);
       setDetailRow(row);
+      setMobilePane("board");
       selectDesignators(splitDesignators(row.designators), row.partMpn || row.value || "part");
     },
     [selectDesignators],
@@ -648,9 +704,7 @@ export default function BoardViewPage() {
 
       const refreshed = await jget<BomRow[]>(`/api/boards/${id}/bom?detail=1`);
       setBom(refreshed);
-      const cleared = new Set<number>();
-      setPopulated(cleared);
-      savePopulated(String(id), cleared);
+      applyProgress([]);
       setConsumeMsg(
         `Stock consumed for one board (${result.consumed?.length ?? 0} matched part type(s)); progress reset for the next board.`,
       );
@@ -706,19 +760,25 @@ export default function BoardViewPage() {
       <Nav />
       <main className="mx-auto w-full max-w-6xl flex-1 p-4 sm:p-6">
         <div className="mb-1 flex flex-wrap items-center gap-2">
-          <Link href={`/boards/${id}`} className="text-sm text-blue-600 hover:underline dark:text-blue-400">
+          <Link href={`/boards/${id}`} className="inline-flex min-h-11 items-center text-sm text-blue-600 hover:underline dark:text-blue-400">
             ← {boardName || "Board"}
           </Link>
           <h1 className="text-2xl font-semibold tracking-tight">Assembly view</h1>
           {boardRev && (
             <span className="text-base text-black/50 dark:text-white/50">{boardRev}</span>
           )}
+          <Link className={`${btn} ml-auto inline-flex items-center`} href={`/stocktake?board=${id}&return=${encodeURIComponent(`/boards/${id}/view`)}`}>
+            Stocktake before build
+          </Link>
         </div>
         <p className="mb-4 text-sm text-black/60 dark:text-white/60">
-          Click a BOM part to highlight it on the board, or scan a component&rsquo;s barcode. Import
-          placements with <code>extract-placements.ulp</code> (Board editor) and upload top/bottom
-          pictures below.
+          Select a BOM part to find it on the board, or scan the component in your hand. Progress is saved on this device.
         </p>
+
+        <div className="mb-4 grid grid-cols-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1 lg:hidden" aria-label="Assembly workspace">
+          <button className={`min-h-11 rounded-lg px-3 text-sm font-semibold ${mobilePane === "parts" ? "bg-blue-700 text-white dark:bg-blue-400 dark:text-slate-950" : "text-[var(--muted)]"}`} onClick={() => setMobilePane("parts")}>Parts list</button>
+          <button className={`min-h-11 rounded-lg px-3 text-sm font-semibold ${mobilePane === "board" ? "bg-blue-700 text-white dark:bg-blue-400 dark:text-slate-950" : "text-[var(--muted)]"}`} onClick={() => setMobilePane("board")}>Board view</button>
+        </div>
 
         {error && (
           <p className="mb-4 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
@@ -744,14 +804,14 @@ export default function BoardViewPage() {
 
         <div className="grid gap-6 lg:grid-cols-[1fr_22rem]">
           {/* Board viewer */}
-          <section>
+          <section className={`${mobilePane === "board" ? "block" : "hidden"} lg:block`}>
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <div className="flex overflow-hidden rounded-md border border-black/15 dark:border-white/20">
                 {(["top", "bottom"] as Side[]).map((s) => (
                   <button
                     key={s}
                     onClick={() => setSide(s)}
-                    className={`px-3 py-1 text-sm capitalize ${
+                    className={`min-h-11 px-3 py-2 text-sm capitalize ${
                       side === s ? "bg-blue-600 text-white" : "hover:bg-black/5 dark:hover:bg-white/10"
                     }`}
                   >
@@ -766,18 +826,6 @@ export default function BoardViewPage() {
               <button className={btn} onClick={() => setScanOpen(true)}>
                 Scan barcode
               </button>
-              {image && (
-                <>
-                  <button className={btn} disabled={busy} onClick={startCalibration}>
-                    {image.calibration ? "Re-calibrate" : "Calibrate"}
-                  </button>
-                  {image.calibration && (
-                    <button className={btn} disabled={busy} onClick={clearCalibration}>
-                      Clear calibration
-                    </button>
-                  )}
-                </>
-              )}
             </div>
 
             {selectionLabel && (
@@ -814,10 +862,25 @@ export default function BoardViewPage() {
               onImageClick={calStep > 0 ? handleCalibrationClick : undefined}
             />
 
-            {/* Upload controls */}
-            <div className="mt-3 flex flex-wrap items-center gap-2">
+            {detailRow && (
+              <div className="mt-3 lg:hidden">
+                <ComponentCard
+                  row={detailRow}
+                  side={sideLabel(detailRow)}
+                  count={countDesignators(detailRow.designators)}
+                  populated={populated.has(detailRow.id)}
+                  onTogglePopulated={() => togglePopulated(detailRow.id)}
+                  onManageStock={detailRow.resolvedPartId ? () => setStockEditorRow(detailRow) : undefined}
+                  onClose={clearSelection}
+                />
+              </div>
+            )}
+
+            <details className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3">
+              <summary className="min-h-11 cursor-pointer py-2 text-sm font-medium">Board image &amp; alignment setup</summary>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
               <button
-                className="rounded-md bg-blue-600 px-2.5 py-1 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                className={btn}
                 disabled={busy}
                 onClick={() => gerberRef.current?.click()}
               >
@@ -837,8 +900,8 @@ export default function BoardViewPage() {
               <span className="text-xs text-black/40 dark:text-white/40">
                 renders top + bottom, aligned automatically
               </span>
-            </div>
-            <div className="mt-2 flex flex-wrap gap-2">
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
               <ImageUploader label={hasTop ? "Replace top image" : "Upload top image"} side="top" busy={busy} onPick={uploadImage} />
               {hasTop && (
                 <button className={btn} disabled={busy} onClick={() => removeImage("top")}>
@@ -856,11 +919,18 @@ export default function BoardViewPage() {
                   Remove bottom
                 </button>
               )}
-            </div>
+              </div>
+              {image && (
+                <div className="mt-3 flex flex-wrap gap-2 border-t border-[var(--border)] pt-3">
+                  <button className={btn} disabled={busy} onClick={startCalibration}>{image.calibration ? "Re-calibrate image" : "Calibrate image"}</button>
+                  {image.calibration && <button className={btn} disabled={busy} onClick={clearCalibration}>Clear calibration</button>}
+                </div>
+              )}
+            </details>
           </section>
 
           {/* BOM list */}
-          <section className="min-w-0">
+          <section className={`${mobilePane === "parts" ? "block" : "hidden"} min-w-0 lg:block`}>
             {/* Build progress */}
             <ProgressBar progress={progress} />
             {progress.totalParts > 0 && progress.doneParts === progress.totalParts && (
@@ -891,6 +961,7 @@ export default function BoardViewPage() {
                 count={countDesignators(detailRow.designators)}
                 populated={populated.has(detailRow.id)}
                 onTogglePopulated={() => togglePopulated(detailRow.id)}
+                onManageStock={detailRow.resolvedPartId ? () => setStockEditorRow(detailRow) : undefined}
                 onClose={clearSelection}
               />
             )}
@@ -898,7 +969,7 @@ export default function BoardViewPage() {
             {/* Filter */}
             <div className="mb-2 flex items-center gap-2">
               <input
-                className="w-full rounded-md border border-black/15 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-blue-500 dark:border-white/20"
+                className="min-h-11 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-600/20"
                 placeholder="Filter by MPN, value, package, designator, DigiKey…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
@@ -910,7 +981,7 @@ export default function BoardViewPage() {
               <span>
                 {filteredBom.length} of {bom.length} line(s)
               </span>
-              <label className="flex cursor-pointer select-none items-center gap-1.5">
+              <label className="flex min-h-11 cursor-pointer select-none items-center gap-1.5">
                 <input
                   type="checkbox"
                   className="h-3.5 w-3.5"
@@ -920,14 +991,14 @@ export default function BoardViewPage() {
                 Hide populated
               </label>
               <button
-                className="text-blue-600 hover:underline disabled:opacity-40 dark:text-blue-400"
+                className="min-h-11 text-blue-600 hover:underline disabled:opacity-40 dark:text-blue-400"
                 disabled={filteredBom.length === 0}
                 onClick={() => setManyPopulated(filteredBom.map((r) => r.id), true)}
               >
                 Mark shown done
               </button>
               <button
-                className="text-blue-600 hover:underline disabled:opacity-40 dark:text-blue-400"
+                className="min-h-11 text-blue-600 hover:underline disabled:opacity-40 dark:text-blue-400"
                 disabled={progress.doneLines === 0}
                 onClick={() => {
                   if (window.confirm("Reset build progress for this board?"))
@@ -938,7 +1009,34 @@ export default function BoardViewPage() {
               </button>
             </div>
 
-            <div className="max-h-[70vh] overflow-auto rounded-lg border border-black/10 dark:border-white/15">
+            <ul className="space-y-2 sm:hidden">
+              {filteredBom.map((row) => {
+                const done = populated.has(row.id);
+                const isSelected = selected.size > 0 && splitDesignators(row.designators).some((designator) => selected.has(norm(designator)));
+                return (
+                  <li key={row.id} className={`rounded-xl border bg-[var(--surface)] shadow-sm ${isSelected ? "border-blue-500" : done ? "border-emerald-400" : "border-[var(--border)]"}`}>
+                    <div className="flex items-stretch">
+                      <button className="min-w-0 flex-1 p-3 text-left" onClick={() => selectBomRow(row)}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className={`break-all font-mono text-sm font-semibold ${done ? "line-through text-[var(--muted)]" : ""}`}>{row.partMpn || row.resolvedMpn || row.value || "Unmatched part"}</p>
+                            <p className="mt-1 break-words text-xs text-[var(--muted)]">{row.designators || "No designators"} · {sideLabel(row)}</p>
+                          </div>
+                          <div className="shrink-0 text-right"><p className="text-lg font-semibold tabular-nums">{row.qtyPerBoard}</p><p className="text-[10px] uppercase text-[var(--muted)]">per board</p></div>
+                        </div>
+                        <p className="mt-2 text-xs text-[var(--muted)]">{[row.value, row.package, row.onHand != null ? `${row.onHand} on hand` : ""].filter(Boolean).join(" · ")}</p>
+                      </button>
+                      <label className="grid min-w-14 cursor-pointer place-items-center border-l border-[var(--border)]" aria-label={done ? `Mark ${row.partMpn || row.value} not populated` : `Mark ${row.partMpn || row.value} populated`}>
+                        <input type="checkbox" className="h-6 w-6 accent-emerald-600" checked={done} onChange={() => togglePopulated(row.id)} />
+                      </label>
+                    </div>
+                  </li>
+                );
+              })}
+              {filteredBom.length === 0 && <li className="rounded-xl border border-dashed border-[var(--border)] p-6 text-center text-sm text-[var(--muted)]">{bom.length === 0 ? "No BOM imported for this board." : hidePopulated && progress.doneLines === progress.totalLines ? "All components populated 🎉" : "No matches."}</li>}
+            </ul>
+
+            <div className="hidden max-h-[70vh] overflow-auto rounded-lg border border-black/10 sm:block dark:border-white/15">
               <table className="w-full text-left text-sm">
                 <thead className="sticky top-0 z-[1] bg-[var(--background)] text-black/50 dark:text-white/50">
                   <tr className="border-b border-black/10 dark:border-white/15">
@@ -1050,6 +1148,24 @@ export default function BoardViewPage() {
           }}
         />
       )}
+
+      {stockEditorRow?.resolvedPartId && (
+        <StockEditorModal
+          partId={stockEditorRow.resolvedPartId}
+          boardId={Number(id)}
+          partLabel={stockEditorRow.resolvedMpn || stockEditorRow.partMpn || stockEditorRow.value}
+          onClose={() => setStockEditorRow(null)}
+          onChanged={() => {
+            void reloadBom().then((rows) => {
+              const refreshed = rows.find((row) => row.id === stockEditorRow.id);
+              if (refreshed) {
+                setDetailRow(refreshed);
+                setStockEditorRow(refreshed);
+              }
+            });
+          }}
+        />
+      )}
     </>
   );
 }
@@ -1093,6 +1209,7 @@ function ComponentCard({
   count,
   populated,
   onTogglePopulated,
+  onManageStock,
   onClose,
 }: {
   row: BomRow;
@@ -1100,6 +1217,7 @@ function ComponentCard({
   count: number;
   populated: boolean;
   onTogglePopulated: () => void;
+  onManageStock?: () => void;
   onClose: () => void;
 }) {
   const url = row.supplier && row.spn ? supplierUrl(row.supplier, row.spn) : null;
@@ -1183,10 +1301,15 @@ function ComponentCard({
               ? `In project location: ${row.projectQuantity}`
               : "Not in this project location — pick from:"}
           </p>
-          <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+          <ul className="mt-2 space-y-1">
             {row.stockLocations?.map((location) => (
-              <li key={location.locationId}>
-                {location.location} <span className="tabular-nums">({location.quantity})</span>
+              <li key={location.locationId} className="flex items-baseline justify-between gap-3">
+                <span>
+                  {location.location}
+                  {location.projectLocation && <span className="ml-1 font-semibold">· board match</span>}
+                  <span className="ml-1 opacity-70">· {verificationLabel(location.lastConfirmedAt)}</span>
+                </span>
+                <span className="shrink-0 font-semibold tabular-nums">{location.quantity}</span>
               </li>
             ))}
           </ul>
@@ -1204,6 +1327,16 @@ function ComponentCard({
             {row.matchNotes?.map((note) => <li key={note}>{note}</li>)}
           </ul>
         </div>
+      )}
+
+      {onManageStock ? (
+        <button className="mt-3 min-h-11 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm font-semibold hover:bg-[var(--surface-subtle)]" onClick={onManageStock}>
+          Count / adjust this stock
+        </button>
+      ) : (
+        <p className="mt-3 rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-xs text-[var(--muted)]">
+          Match this BOM line to an inventory part before adjusting its stock.
+        </p>
       )}
 
       <label className="mt-3 flex cursor-pointer select-none items-center gap-2 text-sm">
@@ -1228,11 +1361,13 @@ function ComponentCard({
 const PlacementDots = memo(function PlacementDots({
   placements,
   mapper,
+  scale,
   calibrating,
   onPlacementClick,
 }: {
   placements: Placement[];
   mapper: (x: number, y: number) => { fx: number; fy: number };
+  scale: number;
   calibrating: boolean;
   onPlacementClick: (p: Placement) => void;
 }) {
@@ -1245,14 +1380,15 @@ const PlacementDots = memo(function PlacementDots({
           <button
             key={p.id}
             title={`${p.designator}${p.mpn ? ` · ${p.mpn}` : ""}`}
+            aria-label={`Select ${p.designator}${p.mpn ? `, ${p.mpn}` : ""}`}
             onClick={(e) => {
               e.stopPropagation();
               if (!calibrating) onPlacementClick(p);
             }}
-            className="absolute -translate-x-1/2 -translate-y-1/2"
-            style={{ left: `${fx * 100}%`, top: `${fy * 100}%` }}
+            className="absolute grid -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full"
+            style={{ left: `${fx * 100}%`, top: `${fy * 100}%`, width: 44 / Math.max(scale, 0.01), height: 44 / Math.max(scale, 0.01) }}
           >
-            <span className="block h-[5px] w-[5px] rounded-full bg-sky-500/60 ring-1 ring-white/50 hover:bg-sky-400" />
+            <span className="block rounded-full bg-sky-500/70 ring-1 ring-white/70 hover:bg-sky-400" style={{ width: 8 / Math.max(scale, 0.01), height: 8 / Math.max(scale, 0.01) }} />
           </button>
         );
       })}
@@ -1290,7 +1426,13 @@ function BoardCanvas({
   const [view, setView] = useState({ scale: 1, tx: 0, ty: 0 });
   const [animate, setAnimate] = useState(false); // CSS transition only for programmatic moves
   const [contentH, setContentH] = useState(675);
-  const drag = useRef<{ x: number; y: number; tx: number; ty: number; moved: boolean } | null>(null);
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const gesture = useRef<
+    | { mode: "pan"; pointerId: number; x: number; y: number; tx: number; ty: number; moved: boolean }
+    | { mode: "pinch"; distance: number; midX: number; midY: number; scale: number; tx: number; ty: number; moved: boolean }
+    | null
+  >(null);
+  const suppressClick = useRef(false);
 
   const W0 = 900; // the board is laid out at a fixed 900px width; height tracks aspect
   const hasActiveImage = side === "top" ? hasTop : hasBottom;
@@ -1299,10 +1441,25 @@ function BoardCanvas({
     const el = viewportRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return;
     const s = Math.min(r.width / W0, r.height / contentH);
     setAnimate(true);
     setView({ scale: s, tx: (r.width - s * W0) / 2, ty: (r.height - s * contentH) / 2 });
   }, [contentH]);
+
+  // The mobile board pane starts hidden while the parts list is active. Refit
+  // when it becomes visible (or rotates/resizes) so it never retains a zero-size
+  // transform measured while display:none.
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect && rect.width > 0 && rect.height > 0) fitView();
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [fitView]);
 
   const measure = useCallback(() => {
     const h = contentRef.current?.offsetHeight;
@@ -1348,27 +1505,88 @@ function BoardCanvas({
   }, []);
 
   function onPointerDown(e: React.PointerEvent) {
-    (e.target as Element).setPointerCapture?.(e.pointerId);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // Synthetic/testing pointer events may not register an active native
+      // pointer. The gesture still works; capture is only for leaving the box.
+    }
     setAnimate(false);
-    drag.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty, moved: false };
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const points = [...pointers.current.values()];
+    if (points.length === 1) {
+      gesture.current = { mode: "pan", pointerId: e.pointerId, x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty, moved: false };
+    } else if (points.length >= 2) {
+      const [a, b] = points;
+      gesture.current = {
+        mode: "pinch",
+        distance: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y)),
+        midX: (a.x + b.x) / 2,
+        midY: (a.y + b.y) / 2,
+        scale: view.scale,
+        tx: view.tx,
+        ty: view.ty,
+        moved: false,
+      };
+    }
   }
   function onPointerMove(e: React.PointerEvent) {
-    const d = drag.current;
-    if (!d) return;
-    const dx = e.clientX - d.x;
-    const dy = e.clientY - d.y;
-    if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
-    // Read tx/ty from the captured `d`, not drag.current: the pointer may lift
-    // (nulling drag.current) before this batched updater runs.
-    setView((v) => ({ ...v, tx: d.tx + dx, ty: d.ty + dy }));
+    if (!pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const activeGesture = gesture.current;
+    if (!activeGesture) return;
+
+    const points = [...pointers.current.values()];
+    if (activeGesture.mode === "pinch" && points.length >= 2) {
+      const [a, b] = points;
+      const distance = Math.max(1, Math.hypot(b.x - a.x, b.y - a.y));
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      if (Math.abs(distance - activeGesture.distance) + Math.abs(midX - activeGesture.midX) + Math.abs(midY - activeGesture.midY) > 3) {
+        activeGesture.moved = true;
+        suppressClick.current = true;
+      }
+      const rect = viewportRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const scale = Math.min(20, Math.max(0.15, activeGesture.scale * (distance / activeGesture.distance)));
+      const contentX = (activeGesture.midX - rect.left - activeGesture.tx) / activeGesture.scale;
+      const contentY = (activeGesture.midY - rect.top - activeGesture.ty) / activeGesture.scale;
+      setView({
+        scale,
+        tx: midX - rect.left - contentX * scale,
+        ty: midY - rect.top - contentY * scale,
+      });
+      return;
+    }
+
+    if (activeGesture.mode === "pan" && activeGesture.pointerId === e.pointerId) {
+      const dx = e.clientX - activeGesture.x;
+      const dy = e.clientY - activeGesture.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) {
+        activeGesture.moved = true;
+        suppressClick.current = true;
+      }
+      setView((current) => ({ ...current, tx: activeGesture.tx + dx, ty: activeGesture.ty + dy }));
+    }
   }
-  function onPointerUp() {
-    drag.current = null;
+  function onPointerUp(e: React.PointerEvent) {
+    pointers.current.delete(e.pointerId);
+    const remaining = [...pointers.current.entries()];
+    if (remaining.length === 1) {
+      const [pointerId, point] = remaining[0];
+      gesture.current = { mode: "pan", pointerId, x: point.x, y: point.y, tx: view.tx, ty: view.ty, moved: true };
+    } else {
+      gesture.current = null;
+    }
   }
 
   // Click on the board surface (used only in calibration mode).
   function onSurfaceClick(e: React.MouseEvent) {
-    if (drag.current?.moved || !onImageClick) return;
+    if (suppressClick.current) {
+      suppressClick.current = false;
+      return;
+    }
+    if (!onImageClick) return;
     const c = contentRef.current;
     if (!c) return;
     const r = c.getBoundingClientRect();
@@ -1391,13 +1609,13 @@ function BoardCanvas({
   return (
     <div className="relative">
       <div className="absolute right-2 top-2 z-10 flex gap-1">
-        <button className="rounded bg-black/50 px-2 py-0.5 text-sm text-white" onClick={() => zoomBy(1.25)}>
+        <button className="grid h-11 w-11 place-items-center rounded-lg bg-slate-950/70 text-xl text-white" aria-label="Zoom in" onClick={() => zoomBy(1.25)}>
           +
         </button>
-        <button className="rounded bg-black/50 px-2 py-0.5 text-sm text-white" onClick={() => zoomBy(1 / 1.25)}>
+        <button className="grid h-11 w-11 place-items-center rounded-lg bg-slate-950/70 text-xl text-white" aria-label="Zoom out" onClick={() => zoomBy(1 / 1.25)}>
           −
         </button>
-        <button className="rounded bg-black/50 px-2 py-0.5 text-xs text-white" onClick={fitView}>
+        <button className="min-h-11 rounded-lg bg-slate-950/70 px-3 text-sm font-medium text-white" onClick={fitView}>
           Fit
         </button>
       </div>
@@ -1410,7 +1628,7 @@ function BoardCanvas({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
+        onPointerCancel={onPointerUp}
         onClick={onSurfaceClick}
       >
         {!hasActiveImage && (
@@ -1456,6 +1674,7 @@ function BoardCanvas({
               <PlacementDots
                 placements={placements}
                 mapper={mapper}
+                scale={view.scale}
                 calibrating={calibrating}
                 onPlacementClick={onPlacementClick}
               />
@@ -1527,7 +1746,7 @@ function BoardCanvas({
         </div>
       </div>
       <p className="mt-1 text-xs text-black/40 dark:text-white/40">
-        Scroll to zoom · drag to pan · click a part to select · Fit resets the view.
+        Pinch or scroll to zoom · drag to pan · tap a part to select · Fit resets the view.
       </p>
     </div>
   );

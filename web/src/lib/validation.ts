@@ -34,6 +34,38 @@ export const adjustStockSchema = z.object({
   quantity: z.number().int().min(0).max(1_000_000),
 });
 
+export const addStockLocationSchema = z.object({
+  locationId: z.number().int().positive(),
+  quantity: z.number().int().min(0).max(1_000_000),
+});
+
+export const moveStockLocationSchema = z
+  .object({
+    fromLocationId: z.number().int().positive(),
+    toLocationId: z.number().int().positive(),
+  })
+  .refine((d) => d.fromLocationId !== d.toLocationId, {
+    message: "source and destination must differ",
+  });
+
+export const stocktakeCountsSchema = z
+  .object({
+    locationId: z.number().int().positive(),
+    counts: z
+      .array(
+        z.object({
+          partId: z.number().int().positive(),
+          quantity: z.number().int().min(0).max(1_000_000),
+        }),
+      )
+      .min(1)
+      .max(5_000),
+    actor: z.string().trim().max(64).optional(),
+  })
+  .refine((data) => new Set(data.counts.map((count) => count.partId)).size === data.counts.length, {
+    message: "duplicate part counts",
+  });
+
 export const purgeSchema = z.object({
   confirm: z.literal("PURGE"),
 });

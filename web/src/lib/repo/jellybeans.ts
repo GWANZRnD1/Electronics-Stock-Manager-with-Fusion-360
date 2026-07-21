@@ -18,12 +18,14 @@ import {
   jellybeanCompatibilityScore,
   normalizePartIdentifier,
 } from "@/lib/domain/jellybeanMatch";
+import { isProjectLocation, stockLocationOrder } from "@/lib/domain/stockRanking";
 
 export interface StockLocationSuggestion {
   locationId: number;
   location: string;
   quantity: number;
   projectLocation: boolean;
+  lastConfirmedAt: Date | null;
 }
 
 export interface ResolvedInventoryPart {
@@ -70,21 +72,6 @@ function publicCandidate(candidate: Candidate): ResolvedInventoryPart {
   ) as unknown as ResolvedInventoryPart;
 }
 
-function locationKey(value: string): string {
-  return value.normalize("NFKC").toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-
-function isProjectLocation(boardName: string, locationName: string): boolean {
-  const board = locationKey(boardName);
-  const location = locationKey(locationName);
-  if (!board || !location) return false;
-  return (
-    board === location ||
-    (Math.min(board.length, location.length) >= 6 &&
-      (board.includes(location) || location.includes(board)))
-  );
-}
-
 async function inventoryCandidates(boardName: string): Promise<Candidate[]> {
   const db = getDb();
   const [partRows, stockRows] = await Promise.all([
@@ -95,6 +82,7 @@ async function inventoryCandidates(boardName: string): Promise<Candidate[]> {
         locationId: locations.id,
         location: locations.name,
         quantity: stockItems.quantity,
+        lastConfirmedAt: stockItems.lastConfirmedAt,
       })
       .from(stockItems)
       .innerJoin(locations, eq(locations.id, stockItems.locationId))
@@ -109,17 +97,13 @@ async function inventoryCandidates(boardName: string): Promise<Candidate[]> {
       location: row.location,
       quantity: row.quantity,
       projectLocation: isProjectLocation(boardName, row.location),
+      lastConfirmedAt: row.lastConfirmedAt,
     });
     stockByPart.set(row.partId, list);
   }
 
   return partRows.map((part) => {
-    const stockLocations = (stockByPart.get(part.id) ?? []).sort(
-      (a, b) =>
-        Number(b.projectLocation) - Number(a.projectLocation) ||
-        b.quantity - a.quantity ||
-        a.location.localeCompare(b.location),
-    );
+    const stockLocations = (stockByPart.get(part.id) ?? []).sort(stockLocationOrder);
     const onHand = stockLocations.reduce((sum, row) => sum + row.quantity, 0);
     const projectQuantity = stockLocations
       .filter((row) => row.projectLocation)

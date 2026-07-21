@@ -62,9 +62,9 @@ function groupByName(boards: Board[]): Family[] {
 }
 
 const inputCls =
-  "rounded-md border border-black/15 bg-transparent px-2 py-1 text-sm outline-none focus:border-blue-500 dark:border-white/20";
+  "min-h-11 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-600/20";
 const btnSm =
-  "rounded-md border border-black/15 px-2.5 py-1 text-sm hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/[0.04]";
+  "min-h-11 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm font-medium hover:bg-[var(--surface-subtle)] disabled:opacity-50";
 
 /** A self-contained inline editor (its own draft state) used for name/revision. */
 function InlineEdit({
@@ -224,8 +224,16 @@ export default function BoardsPage() {
   return (
     <>
       <Nav />
-      <main className="mx-auto w-full max-w-5xl flex-1 p-6">
-        <h1 className="mb-6 text-2xl font-semibold tracking-tight">Boards</h1>
+      <main className="mx-auto w-full max-w-5xl flex-1 p-4 sm:p-6">
+        <header className="mb-6">
+          <p className="text-sm font-semibold uppercase tracking-[0.14em] text-blue-700 dark:text-blue-300">
+            Production
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">Assemble a board</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--muted)]">
+            Choose a revision and go straight to the guided assembly workspace. BOM and image setup stays one action away.
+          </p>
+        </header>
 
         {error && (
           <p className="mb-4 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
@@ -233,23 +241,30 @@ export default function BoardsPage() {
           </p>
         )}
 
+        <details className="mb-6 rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-sm">
+          <summary className="flex min-h-12 cursor-pointer items-center px-4 py-3 text-sm font-semibold">
+            Add or import a board
+          </summary>
+          <div className="border-t border-[var(--border)] p-4">
         <div className="mb-2 flex flex-wrap gap-2">
           <form onSubmit={create} className="flex min-w-[16rem] flex-1 flex-wrap gap-2">
             <input
-              className="min-w-[10rem] flex-1 rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20"
+              className="min-h-11 min-w-[10rem] flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-600/20"
+              aria-label="New board name"
               placeholder="New board name (e.g. Sensor)"
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
             <input
-              className="w-32 rounded-md border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-blue-500 dark:border-white/20"
+              className="min-h-11 w-32 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-600/20"
+              aria-label="Board revision"
               placeholder="Revision"
               value={revision}
               onChange={(e) => setRevision(e.target.value)}
             />
             <button
               type="submit"
-              className="rounded-md bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+              className="min-h-11 rounded-lg bg-blue-700 px-4 py-2 font-medium text-white hover:bg-blue-800 disabled:opacity-50 dark:bg-blue-400 dark:text-slate-950"
               disabled={busy || !name.trim() || !revision.trim()}
             >
               Create
@@ -258,7 +273,7 @@ export default function BoardsPage() {
           <button
             type="button"
             onClick={() => fileRef.current?.click()}
-            className="rounded-md border border-black/15 px-4 py-2 font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/[0.04]"
+            className={btnSm}
             disabled={busy}
           >
             {busy ? "Working…" : "Import board (.json)"}
@@ -271,12 +286,14 @@ export default function BoardsPage() {
             onChange={importBom}
           />
         </div>
-        <p className="mb-6 text-sm text-black/50 dark:text-white/50">
+        <p className="mt-3 text-sm leading-5 text-[var(--muted)]">
           Import the <code>.json</code> from Fusion&rsquo;s <code>extract-board.ulp</code> (BOM +
           placements in one file) or <code>extract-bom.ulp</code> (BOM only) — you&rsquo;ll be asked
           for a revision, then it creates (or updates) that revision and opens it. Same name,
           different revision = a new revision under that board.
         </p>
+          </div>
+        </details>
 
         {active.length === 0 ? (
           <p className="text-sm text-black/60 dark:text-white/60">No boards yet.</p>
@@ -289,7 +306,7 @@ export default function BoardsPage() {
               return (
                 <li
                   key={fam.name}
-                  className="rounded-xl border border-black/10 p-4 dark:border-white/15"
+                  className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm"
                 >
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                     {editingName ? (
@@ -302,7 +319,7 @@ export default function BoardsPage() {
                       />
                     ) : (
                       <Link
-                        href={`/boards/${sel.id}`}
+                        href={`/boards/${sel.id}/view`}
                         className="text-lg font-medium tracking-tight hover:underline"
                       >
                         {fam.name}
@@ -339,37 +356,24 @@ export default function BoardsPage() {
 
                     {!editingName && !editingRev && (
                       <span className="ml-auto flex flex-wrap items-center gap-2">
-                        <Link href={`/boards/${sel.id}`} className={btnSm}>
-                          Open →
+                        <Link
+                          href={`/boards/${sel.id}/view`}
+                          className="flex min-h-11 items-center rounded-lg bg-blue-700 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-800 dark:bg-blue-400 dark:text-slate-950"
+                        >
+                          Start assembly →
                         </Link>
-                        <button
-                          className={btnSm}
-                          disabled={busy}
-                          onClick={() => setEdit({ id: sel.id, field: "name" })}
-                        >
-                          Rename
-                        </button>
-                        <button
-                          className={btnSm}
-                          disabled={busy}
-                          onClick={() => setEdit({ id: sel.id, field: "revision" })}
-                        >
-                          Edit rev
-                        </button>
-                        <button
-                          className={btnSm}
-                          disabled={busy}
-                          onClick={() => run(() => jpatch(`/api/boards/${sel.id}`, { archived: true }))}
-                        >
-                          Archive
-                        </button>
-                        <button
-                          className={`${btnSm} text-red-600 dark:text-red-400`}
-                          disabled={busy}
-                          onClick={() => removeRevision(sel)}
-                        >
-                          Delete
-                        </button>
+                        <Link href={`/boards/${sel.id}`} className={btnSm}>
+                          BOM &amp; setup
+                        </Link>
+                        <details className="relative">
+                          <summary className={`${btnSm} flex cursor-pointer list-none items-center`}>Manage</summary>
+                          <div className="absolute right-0 top-12 z-20 grid min-w-40 gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-xl">
+                            <button className={`${btnSm} text-left`} disabled={busy} onClick={() => setEdit({ id: sel.id, field: "name" })}>Rename board</button>
+                            <button className={`${btnSm} text-left`} disabled={busy} onClick={() => setEdit({ id: sel.id, field: "revision" })}>Edit revision</button>
+                            <button className={`${btnSm} text-left`} disabled={busy} onClick={() => run(() => jpatch(`/api/boards/${sel.id}`, { archived: true }))}>Archive</button>
+                            <button className={`${btnSm} text-left text-red-600 dark:text-red-400`} disabled={busy} onClick={() => removeRevision(sel)}>Delete revision</button>
+                          </div>
+                        </details>
                       </span>
                     )}
                   </div>
@@ -392,7 +396,7 @@ export default function BoardsPage() {
                     key={fam.name}
                     className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 text-sm"
                   >
-                    <Link href={`/boards/${sel.id}`} className="font-medium hover:underline">
+                    <Link href={`/boards/${sel.id}/view`} className="font-medium hover:underline">
                       {fam.name}
                     </Link>
                     {fam.revisions.length > 1 ? (
@@ -415,8 +419,11 @@ export default function BoardsPage() {
                       </span>
                     )}
                     <span className="ml-auto flex gap-2">
+                      <Link href={`/boards/${sel.id}/view`} className={btnSm}>
+                        Assemble
+                      </Link>
                       <Link href={`/boards/${sel.id}`} className={btnSm}>
-                        Open →
+                        BOM &amp; setup
                       </Link>
                       <button
                         className={btnSm}

@@ -7,13 +7,14 @@ import type { PgColumn } from "drizzle-orm/pg-core";
 
 import { getDb } from "@/lib/db";
 import { lookupPart } from "@/lib/distributors";
-import { buildConsumptions, inventoryTxns, locations, parts, stockItems } from "@/lib/db/schema";
+import { boards, buildConsumptions, inventoryTxns, locations, parts, stockItems } from "@/lib/db/schema";
 import { bundleCategories, categoryKey } from "@/lib/domain/categories";
 import { deriveField, deriveValue, unitCostFromOffer } from "@/lib/domain/enrich";
 import type { DigikeyOrderItem } from "@/lib/domain/digikeyOrderCsv";
 import type { NormalizedRow } from "@/lib/domain/inventoryCsv";
 import { extractValue } from "@/lib/domain/inventoryCsv";
 import { packageCode } from "@/lib/domain/jellybeanMatch";
+import { isProjectLocation, stockLocationOrder } from "@/lib/domain/stockRanking";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -229,8 +230,8 @@ export async function assignArucoCodes(
   });
 }
 
-export function listStock(limit = 500) {
-  return getDb()
+export function listStock(limit = 5_000, locationId?: number) {
+  const query = getDb()
     .select({
       partId: parts.id,
       mpn: parts.mpn,
@@ -238,12 +239,67 @@ export function listStock(limit = 500) {
       locationId: locations.id,
       location: locations.name,
       quantity: stockItems.quantity,
+      lastConfirmedAt: stockItems.lastConfirmedAt,
     })
     .from(stockItems)
     .innerJoin(parts, eq(stockItems.partId, parts.id))
-    .innerJoin(locations, eq(stockItems.locationId, locations.id))
-    .orderBy(parts.mpn)
-    .limit(limit);
+    .innerJoin(locations, eq(stockItems.locationId, locations.id));
+  if (locationId) {
+    return query.where(eq(stockItems.locationId, locationId)).orderBy(parts.mpn).limit(limit);
+  }
+  return query.orderBy(parts.mpn).limit(limit);
+}
+
+/** Apply one physical count as an atomic stocktake, confirming unchanged rows too. */
+export async function applyStocktakeCounts(input: {
+  locationId: number;
+  counts: { partId: number; quantity: number }[];
+  actor?: string;
+}) {
+  const db = getDb();
+  const reference = `stocktake:${new Date().toISOString()}`;
+  return db.transaction(async (tx) => {
+    const partIds = input.counts.map((count) => count.partId);
+    const currentRows = await tx
+      .select({ partId: stockItems.partId, quantity: stockItems.quantity })
+      .from(stockItems)
+      .where(
+        and(
+          eq(stockItems.locationId, input.locationId),
+          inArray(stockItems.partId, partIds),
+        ),
+      );
+    const currentByPart = new Map(currentRows.map((row) => [row.partId, row.quantity]));
+    const missing = partIds.filter((partId) => !currentByPart.has(partId));
+    if (missing.length > 0) return { reference, confirmed: 0, changed: 0, missing };
+
+    let changed = 0;
+    for (const count of input.counts) {
+      const previous = currentByPart.get(count.partId)!;
+      const delta = count.quantity - previous;
+      await tx
+        .update(stockItems)
+        .set({ quantity: count.quantity, lastConfirmedAt: sql`now()` })
+        .where(
+          and(
+            eq(stockItems.partId, count.partId),
+            eq(stockItems.locationId, input.locationId),
+          ),
+        );
+      if (delta !== 0) {
+        changed += 1;
+        await tx.insert(inventoryTxns).values({
+          partId: count.partId,
+          locationId: input.locationId,
+          delta,
+          reason: "stocktake",
+          ref: reference,
+          actor: input.actor ?? "",
+        });
+      }
+    }
+    return { reference, confirmed: input.counts.length, changed, missing: [] as number[] };
+  });
 }
 
 /** Receive `quantity` of `mpn` into a location: find/create the part, bump stock, log a txn. */
@@ -579,18 +635,161 @@ export async function searchCatalog(f: CatalogFilters = {}) {
 }
 
 /** Per-location stock detail for one part (the expandable row). */
-export async function getPartStock(partId: number) {
-  return getDb()
-    .select({
-      locationId: stockItems.locationId,
-      location: locations.name,
-      quantity: stockItems.quantity,
-      lastConfirmedAt: stockItems.lastConfirmedAt,
-    })
-    .from(stockItems)
-    .innerJoin(locations, eq(locations.id, stockItems.locationId))
-    .where(eq(stockItems.partId, partId))
-    .orderBy(locations.name);
+export async function getPartStock(partId: number, boardId?: number) {
+  const db = getDb();
+  const [rows, boardRows] = await Promise.all([
+    db
+      .select({
+        locationId: stockItems.locationId,
+        location: locations.name,
+        quantity: stockItems.quantity,
+        lastConfirmedAt: stockItems.lastConfirmedAt,
+      })
+      .from(stockItems)
+      .innerJoin(locations, eq(locations.id, stockItems.locationId))
+      .where(eq(stockItems.partId, partId))
+      .orderBy(locations.name),
+    boardId
+      ? db.select({ name: boards.name }).from(boards).where(eq(boards.id, boardId)).limit(1)
+      : Promise.resolve([]),
+  ]);
+  const boardName = boardRows[0]?.name ?? "";
+  return rows
+    .map((row) => ({
+      ...row,
+      projectLocation: Boolean(boardName) && isProjectLocation(boardName, row.location),
+    }))
+    .sort(stockLocationOrder);
+}
+
+/**
+ * Assign a catalog part to a location with an initial on-hand count. A zero
+ * quantity is allowed so a bin can be reserved before stock arrives. Returns
+ * null when that part/location assignment already exists.
+ */
+export async function addStockLocation(
+  partId: number,
+  locationId: number,
+  quantity: number,
+  actor = "",
+): Promise<{ quantity: number } | null> {
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(stockItems)
+      .values({ partId, locationId, quantity, lastConfirmedAt: sql`now()` })
+      .onConflictDoNothing({ target: [stockItems.partId, stockItems.locationId] })
+      .returning({ quantity: stockItems.quantity });
+    if (!created) return null;
+
+    if (quantity !== 0) {
+      await tx.insert(inventoryTxns).values({
+        partId,
+        locationId,
+        delta: quantity,
+        reason: "adjust",
+        actor,
+        ref: "location added",
+      });
+    }
+    return created;
+  });
+}
+
+/**
+ * Move every unit in one part/location assignment to another location. Existing
+ * destination stock is merged. The paired ledger entries keep the total stock
+ * unchanged and make both sides of the move auditable.
+ */
+export async function moveStockLocation(
+  partId: number,
+  fromLocationId: number,
+  toLocationId: number,
+  actor = "",
+): Promise<{ quantity: number; moved: number } | null> {
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const [source] = await tx
+      .select({ quantity: stockItems.quantity })
+      .from(stockItems)
+      .where(and(eq(stockItems.partId, partId), eq(stockItems.locationId, fromLocationId)))
+      .for("update");
+    if (!source) return null;
+
+    const [destination] = await tx
+      .insert(stockItems)
+      .values({ partId, locationId: toLocationId, quantity: source.quantity, lastConfirmedAt: sql`now()` })
+      .onConflictDoUpdate({
+        target: [stockItems.partId, stockItems.locationId],
+        set: {
+          quantity: sql`${stockItems.quantity} + ${source.quantity}`,
+          lastConfirmedAt: sql`now()`,
+        },
+      })
+      .returning({ quantity: stockItems.quantity });
+
+    await tx
+      .delete(stockItems)
+      .where(and(eq(stockItems.partId, partId), eq(stockItems.locationId, fromLocationId)));
+
+    if (source.quantity !== 0) {
+      await tx.insert(inventoryTxns).values([
+        {
+          partId,
+          locationId: fromLocationId,
+          delta: -source.quantity,
+          reason: "move",
+          actor,
+          ref: `to location ${toLocationId}`,
+        },
+        {
+          partId,
+          locationId: toLocationId,
+          delta: source.quantity,
+          reason: "move",
+          actor,
+          ref: `from location ${fromLocationId}`,
+        },
+      ]);
+    }
+
+    return { quantity: destination.quantity, moved: source.quantity };
+  });
+}
+
+/**
+ * Remove a part/location assignment. Any remaining quantity is first balanced
+ * to zero in the ledger so deleting the materialized stock row loses no history.
+ */
+export async function removeStockLocation(
+  partId: number,
+  locationId: number,
+  actor = "",
+): Promise<{ removed: number } | null> {
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select({ quantity: stockItems.quantity })
+      .from(stockItems)
+      .where(and(eq(stockItems.partId, partId), eq(stockItems.locationId, locationId)))
+      .for("update");
+    if (!current) return null;
+
+    if (current.quantity !== 0) {
+      await tx.insert(inventoryTxns).values({
+        partId,
+        locationId,
+        delta: -current.quantity,
+        reason: "adjust",
+        actor,
+        ref: "location removed",
+      });
+    }
+    await tx
+      .delete(stockItems)
+      .where(and(eq(stockItems.partId, partId), eq(stockItems.locationId, locationId)));
+    return { removed: current.quantity };
+  });
 }
 
 /**
@@ -618,6 +817,11 @@ export async function setStockQuantity(
         .set({ quantity, lastConfirmedAt: sql`now()` })
         .where(and(eq(stockItems.partId, partId), eq(stockItems.locationId, locationId)));
       await tx.insert(inventoryTxns).values({ partId, locationId, delta, reason: "adjust", actor });
+    } else {
+      await tx
+        .update(stockItems)
+        .set({ lastConfirmedAt: sql`now()` })
+        .where(and(eq(stockItems.partId, partId), eq(stockItems.locationId, locationId)));
     }
     return { quantity };
   });

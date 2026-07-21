@@ -4,12 +4,29 @@ import { useEffect, useState } from "react";
 
 import { ArucoMarker } from "@/components/ArucoMarker";
 import { Nav } from "@/components/Nav";
-import { Modal, btn, cardClass, inputClass } from "@/components/ui";
+import { Modal, btn, btnSecondary, cardClass, inputClass } from "@/components/ui";
 import { ARUCO_DICT_NAMES, dictCapacity, type ArucoDictName } from "@/lib/aruco/marker";
-import { jget, jpost, jpostText, jput } from "@/lib/client";
+import { jget, jpatch, jpost, jpostText, jput } from "@/lib/client";
+
+interface SessionUser {
+  name: string;
+  isRoot: boolean;
+  gateEnabled: boolean;
+}
 
 export default function SettingsPage() {
   const [importOpen, setImportOpen] = useState(false);
+  const [sessionUser, setSessionUser] = useState<SessionUser | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void jget<{ user: SessionUser }>("/api/auth/session")
+      .then((result) => active && setSessionUser(result.user))
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <>
@@ -17,6 +34,8 @@ export default function SettingsPage() {
       <main className="mx-auto w-full max-w-7xl flex-1 p-4 sm:p-6">
         <h1 className="mb-4 text-2xl font-semibold tracking-tight">Settings</h1>
         <div className="space-y-4">
+          {sessionUser && <AccountPanel user={sessionUser} />}
+          {sessionUser?.isRoot && <UserAccessPanel gateEnabled={sessionUser.gateEnabled} />}
           <section className={cardClass}>
             <h2 className="mb-1 font-medium">Import inventory CSV</h2>
             <p className="mb-3 text-sm text-black/60 dark:text-white/60">
@@ -39,16 +58,236 @@ export default function SettingsPage() {
   );
 }
 
+function AccountPanel({ user }: { user: SessionUser }) {
+  const [busy, setBusy] = useState(false);
+
+  async function signOut() {
+    setBusy(true);
+    try {
+      await jpost("/api/auth/logout", {});
+    } finally {
+      window.location.href = "/unlock";
+    }
+  }
+
+  return (
+    <section className={cardClass}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+            Signed in
+          </p>
+          <h2 className="mt-1 font-medium">
+            {user.name} {user.isRoot && <span className="text-sm text-blue-700 dark:text-blue-300">· Root</span>}
+          </h2>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            Board population checklists are saved separately for this account.
+          </p>
+        </div>
+        <button className={btnSecondary} disabled={busy} onClick={() => void signOut()}>
+          {busy ? "Signing out…" : "Sign out"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+interface ManagedUser {
+  id: number;
+  name: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function UserAccessPanel({ gateEnabled }: { gateEnabled: boolean }) {
+  const [users, setUsers] = useState<ManagedUser[] | null>(null);
+  const [name, setName] = useState("");
+  const [pin, setPin] = useState("");
+  const [resetId, setResetId] = useState<number | null>(null);
+  const [resetPin, setResetPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const reload = async () => {
+    const result = await jget<{ users: ManagedUser[] }>("/api/settings/users");
+    setUsers(result.users);
+  };
+
+  useEffect(() => {
+    let active = true;
+    void jget<{ users: ManagedUser[] }>("/api/settings/users")
+      .then((result) => {
+        if (active) setUsers(result.users);
+      })
+      .catch((error) => {
+        if (active) {
+          setMessage(error instanceof Error ? error.message : "Could not load users.");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function addUser(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    try {
+      await jpost("/api/settings/users", { name, pin });
+      setName("");
+      setPin("");
+      await reload();
+      setMessage("User added. They can sign in immediately with their PIN.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not add user.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setActive(user: ManagedUser, active: boolean) {
+    setBusy(true);
+    setMessage("");
+    try {
+      await jpatch(`/api/settings/users/${user.id}`, { active });
+      await reload();
+      setMessage(active ? `${user.name} can sign in again.` : `${user.name} was signed out on all devices.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not update user.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveReset(user: ManagedUser) {
+    setBusy(true);
+    setMessage("");
+    try {
+      await jpatch(`/api/settings/users/${user.id}`, { pin: resetPin });
+      setResetId(null);
+      setResetPin("");
+      await reload();
+      setMessage(`${user.name}'s PIN changed; their other sessions were signed out.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not reset PIN.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className={cardClass}>
+      <h2 className="font-medium">User access</h2>
+      <p className="mt-1 text-sm text-[var(--muted)]">
+        The root master PIN remains the current <code>ACCESS_PIN</code>. Extra PINs are stored as
+        salted hashes and each user gets an independent assembly checklist.
+      </p>
+      {!gateEnabled && (
+        <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">
+          Access control is currently disabled because <code>ACCESS_PIN</code> is not configured.
+          Extra users can be prepared here, but their PINs take effect only after the root PIN is set.
+        </p>
+      )}
+
+      <div className="mt-4 space-y-2">
+        {users === null ? (
+          <p className="text-sm text-[var(--muted)]">Loading users…</p>
+        ) : users.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-[var(--border)] p-3 text-sm text-[var(--muted)]">
+            No additional users yet.
+          </p>
+        ) : (
+          users.map((user) => (
+            <div key={user.id} className="rounded-xl border border-[var(--border)] p-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="font-medium">{user.name}</p>
+                  <p className={`text-xs ${user.active ? "text-emerald-700 dark:text-emerald-300" : "text-[var(--muted)]"}`}>
+                    {user.active ? "Active" : "Access paused"}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button className={btnSecondary} disabled={busy} onClick={() => {
+                    setResetId(resetId === user.id ? null : user.id);
+                    setResetPin("");
+                  }}>
+                    Reset PIN
+                  </button>
+                  <button className={btnSecondary} disabled={busy} onClick={() => void setActive(user, !user.active)}>
+                    {user.active ? "Pause access" : "Restore access"}
+                  </button>
+                </div>
+              </div>
+              {resetId === user.id && (
+                <div className="mt-3 flex flex-col gap-2 border-t border-[var(--border)] pt-3 sm:flex-row">
+                  <label className="flex-1 text-sm font-medium">
+                    New 4–12 digit PIN
+                    <input
+                      className={`${inputClass} mt-1`}
+                      type="password"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      autoComplete="new-password"
+                      value={resetPin}
+                      onChange={(event) => setResetPin(event.target.value.replace(/\D/g, "").slice(0, 12))}
+                    />
+                  </label>
+                  <button className={`${btn} sm:self-end`} disabled={busy || resetPin.length < 4} onClick={() => void saveReset(user)}>
+                    Save new PIN
+                  </button>
+                </div>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      <form className="mt-4 rounded-xl bg-[var(--surface-subtle)] p-3" onSubmit={(event) => void addUser(event)}>
+        <h3 className="text-sm font-semibold">Add user</h3>
+        <div className="mt-2 grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+          <label className="text-sm font-medium">
+            Display name
+            <input className={`${inputClass} mt-1`} autoComplete="off" value={name} onChange={(event) => setName(event.target.value)} />
+          </label>
+          <label className="text-sm font-medium">
+            4–12 digit PIN
+            <input
+              className={`${inputClass} mt-1`}
+              type="password"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              autoComplete="new-password"
+              value={pin}
+              onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 12))}
+            />
+          </label>
+          <button className={btn} disabled={busy || !name.trim() || pin.length < 4} type="submit">
+            {busy ? "Saving…" : "Add user"}
+          </button>
+        </div>
+      </form>
+      {message && <p className="mt-3 text-sm text-[var(--muted)]" role="status">{message}</p>}
+    </section>
+  );
+}
+
 interface PurchaseConfig {
   preferredSupplier: "digikey" | "lcsc";
   priceDifferenceThresholdPercent: number;
   normallyStockingOnly: boolean;
   excludeMarketplace: boolean;
   inStockOnly: boolean;
+  minimumBoardCount: number;
+  bulkOrderQuantities: number[];
+  inexpensiveLineLimitUsd: number;
+  takeNoExtraCostBreaks: boolean;
 }
 
 function PurchasingPanel() {
   const [config, setConfig] = useState<PurchaseConfig | null>(null);
+  const [bulkDraft, setBulkDraft] = useState("");
   const [apis, setApis] = useState({ digikey: false, lcsc: false });
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
@@ -61,6 +300,7 @@ function PurchasingPanel() {
       .then((result) => {
         if (active) {
           setConfig(result.config);
+          setBulkDraft(result.config.bulkOrderQuantities.join(", "));
           setApis(result.apis);
         }
       })
@@ -76,14 +316,33 @@ function PurchasingPanel() {
 
   async function save() {
     if (!config) return;
+    const bulkOrderQuantities = [
+      ...new Set(
+        bulkDraft
+          .split(/[\s,]+/)
+          .filter(Boolean)
+          .map(Number),
+      ),
+    ].sort((a, b) => a - b);
+    if (
+      bulkOrderQuantities.length > 10 ||
+      bulkOrderQuantities.some(
+        (quantity) => !Number.isInteger(quantity) || quantity < 1 || quantity > 1_000_000,
+      )
+    ) {
+      setMessage("Bulk quantities must be whole positive numbers, with at most 10 values.");
+      return;
+    }
+    const nextConfig = { ...config, bulkOrderQuantities };
     setSaving(true);
     setMessage("");
     try {
       const result = await jput<{
         config: PurchaseConfig;
         apis: { digikey: boolean; lcsc: boolean };
-      }>("/api/settings/purchasing", config);
+      }>("/api/settings/purchasing", nextConfig);
       setConfig(result.config);
+      setBulkDraft(result.config.bulkOrderQuantities.join(", "));
       setApis(result.apis);
       setMessage("Purchasing settings saved.");
     } catch (error) {
@@ -145,12 +404,55 @@ function PurchasingPanel() {
               />
             </label>
           </div>
-          <div className="grid gap-2 sm:grid-cols-3">
+          <div className="rounded-xl border border-[var(--border)] p-3">
+            <h3 className="text-sm font-semibold">Order quantity rules</h3>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              Set the minimum workshop buffer and the price-break quantities the planner should test.
+            </p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <label>
+                <span className="mb-1 block text-black/60 dark:text-white/60">Keep enough for boards</span>
+                <input
+                  className={inputClass}
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={config.minimumBoardCount}
+                  onChange={(event) => setConfig({ ...config, minimumBoardCount: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                <span className="mb-1 block text-black/60 dark:text-white/60">Price-break quantities</span>
+                <input
+                  className={inputClass}
+                  inputMode="numeric"
+                  placeholder="25, 50, 100"
+                  value={bulkDraft}
+                  onChange={(event) => setBulkDraft(event.target.value)}
+                />
+              </label>
+              <label>
+                <span className="mb-1 block text-black/60 dark:text-white/60">Cheap line limit (USD)</span>
+                <input
+                  className={inputClass}
+                  type="number"
+                  min={0}
+                  max={10000}
+                  step={0.25}
+                  value={config.inexpensiveLineLimitUsd}
+                  onChange={(event) => setConfig({ ...config, inexpensiveLineLimitUsd: Number(event.target.value) })}
+                />
+              </label>
+            </div>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             {(
               [
                 ["normallyStockingOnly", "Normally stocking only"],
                 ["excludeMarketplace", "Exclude marketplace"],
                 ["inStockOnly", "In stock / enough quantity"],
+                ["takeNoExtraCostBreaks", "Take larger quantity at no extra cost"],
               ] as const
             ).map(([key, label]) => (
               <label key={key} className="flex items-center gap-2">

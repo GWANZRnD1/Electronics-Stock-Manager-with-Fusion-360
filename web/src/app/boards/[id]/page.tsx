@@ -59,6 +59,9 @@ interface PurchaseSelectionRow {
   partKey: string;
   reference: string;
   quantity: number;
+  requestedQuantity: number;
+  minimumQuantity: number;
+  quantityReason: "minimum" | "bulk_under_two_dollars" | "price_break_no_extra_cost";
   jellybean: boolean;
   supplier: "digikey" | "lcsc";
   chosen: {
@@ -81,6 +84,17 @@ interface PurchaseSelectionRow {
   } | null;
   savingsPercent: number;
   reason: string;
+}
+
+interface PurchasePolicy {
+  preferredSupplier: "digikey" | "lcsc";
+  normallyStockingOnly: boolean;
+  excludeMarketplace: boolean;
+  inStockOnly: boolean;
+  minimumBoardCount: number;
+  bulkOrderQuantities: number[];
+  inexpensiveLineLimitUsd: number;
+  takeNoExtraCostBreaks: boolean;
 }
 
 // Real-MPN shortage keys only (not the synthetic "value|package" / "line-N"
@@ -129,6 +143,7 @@ export default function BoardDetailPage() {
   const [resolvedBatchText, setResolvedBatchText] = useState("");
   const [lcscBatchText, setLcscBatchText] = useState("");
   const [purchaseSelections, setPurchaseSelections] = useState<PurchaseSelectionRow[]>([]);
+  const [purchasePolicy, setPurchasePolicy] = useState<PurchasePolicy | null>(null);
   const [busy, setBusy] = useState(false);
   const [buildList, setBuildList] = useState<BuildRow[]>([]);
   const [buildMsg, setBuildMsg] = useState("");
@@ -374,6 +389,7 @@ export default function BoardDetailPage() {
     setBatchMsg("Comparing DigiKey NZ and LCSC stock and pricing…");
     try {
       const plan = await jpost<{
+        config: PurchasePolicy;
         selections: PurchaseSelectionRow[];
         unresolved: { partKey: string; quantity: number; reason: string }[];
         errors: { partKey: string; distributor: string; message: string }[];
@@ -386,11 +402,13 @@ export default function BoardDetailPage() {
           partKey: shortage.partKey,
           reference: shortage.reference,
           quantity: shortage.shortage,
+          qtyPerBoard: shortage.qtyPerBoard,
         })),
       });
       setResolvedBatchText(plan.digikeyBulkAdd);
       setLcscBatchText(plan.lcscBulkAdd);
       setPurchaseSelections(plan.selections);
+      setPurchasePolicy(plan.config);
 
       let opened = false;
       let openError = "";
@@ -568,6 +586,7 @@ export default function BoardDetailPage() {
               resolvedBatchText={resolvedBatchText}
               lcscBatchText={lcscBatchText}
               purchaseSelections={purchaseSelections}
+              purchasePolicy={purchasePolicy}
               onCopy={copyText}
             />
           )}
@@ -609,6 +628,7 @@ function ShortageView({
   resolvedBatchText,
   lcscBatchText,
   purchaseSelections,
+  purchasePolicy,
   onCopy,
 }: {
   report: ShortageReport;
@@ -621,6 +641,7 @@ function ShortageView({
   resolvedBatchText: string;
   lcscBatchText: string;
   purchaseSelections: PurchaseSelectionRow[];
+  purchasePolicy: PurchasePolicy | null;
   onCopy: (text: string) => void;
 }) {
   const allChecked = report.lines.length > 0 && report.lines.every((l) => selected.has(l.partKey));
@@ -641,7 +662,11 @@ function ShortageView({
       </p>
 
       {report.lines.length > 0 && (
-        <div className="overflow-x-auto">
+        <details className="rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+          <summary className="min-h-11 cursor-pointer px-4 py-3 text-sm font-semibold">
+            Build allocation details ({report.lines.length} component types)
+          </summary>
+          <div className="overflow-x-auto border-t border-[var(--border)] px-4 pb-3">
           <table className="w-full text-left text-sm">
             <thead className="text-black/50 dark:text-white/50">
               <tr className="border-b border-black/10 dark:border-white/15">
@@ -691,29 +716,42 @@ function ShortageView({
               ))}
             </tbody>
           </table>
-        </div>
+          </div>
+        </details>
       )}
 
       {report.shortages.length > 0 && (
-        <div className="mt-6 rounded-lg border border-black/10 p-4 dark:border-white/15">
+        <div className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm">
           <div className="mb-4 flex flex-wrap items-center gap-3">
-            <h3 className="font-medium">Buy shortages</h3>
+            <div className="mr-auto">
+              <h3 className="font-semibold">Purchase plan</h3>
+              <p className="mt-0.5 text-xs text-[var(--muted)]">Live price, stock, and sensible workshop quantities.</p>
+            </div>
             <button
-              className="rounded-md bg-[#cc0000] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#b30000]"
+              className="min-h-11 rounded-lg bg-blue-700 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-800 dark:bg-blue-400 dark:text-slate-950"
               onClick={onDigikeyBatch}
             >
-              Compare DigiKey NZ + LCSC →
+              Generate priced bulk lists
             </button>
-            {batchMsg && <span className="text-sm text-black/60 dark:text-white/60">{batchMsg}</span>}
+            {batchMsg && <p className="w-full rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-sm text-[var(--muted)]" role="status">{batchMsg}</p>}
           </div>
 
+          {purchasePolicy && (
+            <div className="mb-4 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
+              <span className="rounded-full bg-[var(--surface-subtle)] px-2.5 py-1">≥ {purchasePolicy.minimumBoardCount} boards</span>
+              {purchasePolicy.bulkOrderQuantities.length > 0 && (
+                <span className="rounded-full bg-[var(--surface-subtle)] px-2.5 py-1">
+                  Test {purchasePolicy.bulkOrderQuantities.join(" / ")} under US${purchasePolicy.inexpensiveLineLimitUsd}
+                </span>
+              )}
+              {purchasePolicy.inStockOnly && <span className="rounded-full bg-[var(--surface-subtle)] px-2.5 py-1">In stock only</span>}
+              {purchasePolicy.normallyStockingOnly && <span className="rounded-full bg-[var(--surface-subtle)] px-2.5 py-1">Normally stocked</span>}
+              {purchasePolicy.excludeMarketplace && <span className="rounded-full bg-[var(--surface-subtle)] px-2.5 py-1">No marketplace</span>}
+            </div>
+          )}
+
           <BulkAddBox
-            label="Raw shortage list — all components (quantity,part,reference). Jellybean descriptors still need resolution."
-            text={rawBatchText}
-            onCopy={onCopy}
-          />
-          <BulkAddBox
-            label="DigiKey NZ list — resolved and price-selected (quantity,part,reference)"
+            label="DigiKey bulk add — priced and quantity-adjusted"
             text={resolvedBatchText}
             onCopy={onCopy}
           />
@@ -722,9 +760,26 @@ function ShortageView({
             text={lcscBatchText}
             onCopy={onCopy}
           />
+          <details className="mb-4 rounded-lg border border-[var(--border)] px-3 py-2">
+            <summary className="min-h-11 cursor-pointer py-2 text-sm font-medium">Raw shortage list and unresolved descriptors</summary>
+            <BulkAddBox label="Raw shortage quantity, part, reference" text={rawBatchText} onCopy={onCopy} />
+          </details>
 
           {purchaseSelections.length > 0 && (
-            <div className="mb-4 overflow-x-auto rounded-md border border-black/10 dark:border-white/15">
+            <>
+              <ul className="mb-4 space-y-2 sm:hidden">
+                {purchaseSelections.map((selection) => (
+                  <li key={`${selection.partKey}:${selection.supplier}`} className="rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0"><p className="break-all font-mono text-sm font-semibold">{selection.partKey}</p><a className="mt-1 block break-all text-sm text-blue-700 underline dark:text-blue-300" href={selection.chosen.productUrl || undefined} target="_blank" rel="noopener">{selection.chosen.partNumber}</a></div>
+                      <div className="shrink-0 text-right"><p className="text-lg font-semibold tabular-nums">{selection.quantity}</p><p className="text-xs text-[var(--muted)]">to buy</p></div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-sm"><div><span className="text-xs text-[var(--muted)]">Unit</span><p className="font-semibold tabular-nums">{selection.chosen.unitPrice > 0 ? `$${selection.chosen.unitPrice.toFixed(4)}` : "—"}</p></div><div><span className="text-xs text-[var(--muted)]">Line total</span><p className="font-semibold tabular-nums">{selection.chosen.totalPrice > 0 ? `$${selection.chosen.totalPrice.toFixed(2)}` : "—"}</p></div></div>
+                    <p className="mt-2 text-xs text-[var(--muted)]">Minimum {selection.minimumQuantity}; {selection.quantityReason === "bulk_under_two_dollars" ? `bulk count remains under US$${purchasePolicy?.inexpensiveLineLimitUsd ?? 2}` : selection.quantityReason === "price_break_no_extra_cost" ? "higher price break costs no more" : `${purchasePolicy?.minimumBoardCount ?? 3}-board / shortage minimum`}.</p>
+                  </li>
+                ))}
+              </ul>
+              <div className="mb-4 hidden overflow-x-auto rounded-lg border border-[var(--border)] sm:block">
               <table className="w-full text-left text-xs">
                 <thead className="bg-black/[0.025] text-black/50 dark:bg-white/[0.04] dark:text-white/50">
                   <tr>
@@ -732,6 +787,7 @@ function ShortageView({
                     <th className="px-2 py-1.5 font-medium">Selected</th>
                     <th className="px-2 py-1.5 text-right font-medium">Qty</th>
                     <th className="px-2 py-1.5 text-right font-medium">USD/unit</th>
+                    <th className="px-2 py-1.5 text-right font-medium">Line total</th>
                     <th className="px-2 py-1.5 font-medium">Comparison</th>
                   </tr>
                 </thead>
@@ -759,7 +815,13 @@ function ShortageView({
                           ? `$${selection.chosen.unitPrice.toFixed(4)}`
                           : "—"}
                       </td>
+                      <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{selection.chosen.totalPrice > 0 ? `$${selection.chosen.totalPrice.toFixed(2)}` : "—"}</td>
                       <td className="px-2 py-1.5 text-black/55 dark:text-white/55">
+                        {selection.quantity > selection.minimumQuantity
+                          ? selection.quantityReason === "bulk_under_two_dollars"
+                            ? `bulk ${selection.minimumQuantity}→${selection.quantity} under $${purchasePolicy?.inexpensiveLineLimitUsd ?? 2} · `
+                            : `price break ${selection.minimumQuantity}→${selection.quantity} · `
+                          : ""}
                         {selection.alternative
                           ? selection.reason === "cheaper_over_threshold"
                             ? `${selection.savingsPercent.toFixed(1)}% cheaper than preferred`
@@ -771,7 +833,8 @@ function ShortageView({
                   ))}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           )}
 
           <div className="space-y-4">
@@ -857,19 +920,19 @@ function BulkAddBox({
 }) {
   if (!text) return null;
   return (
-    <div className="mb-4">
-      <div className="mb-1 flex items-center gap-2">
-        <span className="text-xs font-medium text-black/50 dark:text-white/50">{label}</span>
+    <div className="mb-4 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-sm font-semibold">{label}</span>
         <button
-          className="rounded border border-black/15 px-2 py-0.5 text-xs hover:bg-black/[0.03] dark:border-white/20 dark:hover:bg-white/[0.04]"
+          className="min-h-11 shrink-0 rounded-lg bg-blue-700 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-800 dark:bg-blue-400 dark:text-slate-950"
           onClick={() => onCopy(text)}
         >
-          Copy
+          Copy list
         </button>
       </div>
       <textarea
         readOnly
-        className="h-28 w-full rounded-md border border-black/15 bg-transparent p-2 font-mono text-xs outline-none dark:border-white/20"
+        className="h-28 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 font-mono text-xs outline-none focus:ring-2 focus:ring-blue-600/20"
         value={text}
         onFocus={(e) => e.currentTarget.select()}
       />

@@ -11,6 +11,7 @@ import {
   integer,
   numeric,
   pgTable,
+  primaryKey,
   serial,
   text,
   timestamp,
@@ -63,6 +64,35 @@ export const appSettings = pgTable("app_settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull().default(""),
 });
+
+// Additional workshop identities. The root identity remains backed by
+// ACCESS_PIN and is deliberately not copied into the database.
+export const authUsers = pgTable(
+  "auth_users",
+  {
+    id: serial("id").primaryKey(),
+    name: text("name").notNull(),
+    pinHash: text("pin_hash").notNull(),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("auth_users_name_uq").on(t.name)],
+);
+
+// Opaque, revocable sessions. Storing only a digest means a database read
+// cannot be used directly as an authenticated browser cookie.
+export const authSessions = pgTable(
+  "auth_sessions",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    userId: integer("user_id").references(() => authUsers.id, { onDelete: "cascade" }),
+    isRoot: boolean("is_root").notNull().default(false),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("auth_sessions_user_idx").on(t.userId), index("auth_sessions_expiry_idx").on(t.expiresAt)],
+);
 
 export const stockItems = pgTable(
   "stock_items",
@@ -181,6 +211,27 @@ export const bomLines = pgTable(
     matchedPartId: integer("matched_part_id").references(() => parts.id),
   },
   (t) => [index("bom_board_idx").on(t.boardId), index("bom_mpn_idx").on(t.partMpn)],
+);
+
+// One row means one BOM line is populated for one identity. Per-line,
+// idempotent writes avoid lost updates when the same account is open on two
+// devices, while user_key keeps each assembler's checklist independent.
+export const boardPopulationProgress = pgTable(
+  "board_population_progress",
+  {
+    userKey: text("user_key").notNull(),
+    boardId: integer("board_id")
+      .notNull()
+      .references(() => boards.id, { onDelete: "cascade" }),
+    bomLineId: integer("bom_line_id")
+      .notNull()
+      .references(() => bomLines.id, { onDelete: "cascade" }),
+    completedAt: timestamp("completed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userKey, t.bomLineId], name: "board_population_progress_pk" }),
+    index("board_population_user_board_idx").on(t.userKey, t.boardId),
+  ],
 );
 
 export const builds = pgTable(
