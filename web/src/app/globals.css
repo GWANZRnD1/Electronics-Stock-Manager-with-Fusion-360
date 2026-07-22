@@ -48,6 +48,16 @@ body {
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
 
+.assembly-detail-sheet {
+  bottom: calc(4rem + env(safe-area-inset-bottom));
+}
+
+@media (min-width: 640px) {
+  .assembly-detail-sheet {
+    bottom: 1rem;
+  }
+}
+
 button,
 a,
 input,

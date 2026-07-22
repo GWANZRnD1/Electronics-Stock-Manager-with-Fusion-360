@@ -193,12 +193,14 @@ export default function BoardViewPage() {
 
   // Selection: highlighted designators (uppercase) + a label for the header.
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [focusedDesignator, setFocusedDesignator] = useState<string | null>(null);
   const [selectionLabel, setSelectionLabel] = useState("");
   const [scanNotes, setScanNotes] = useState<string[]>([]);
   // The BOM line whose detail card is shown (set when a single line is selected).
   const [detailRow, setDetailRow] = useState<BomRow | null>(null);
   const [stockEditorRow, setStockEditorRow] = useState<BomRow | null>(null);
   const [mobilePane, setMobilePane] = useState<"board" | "parts">("parts");
+  const [mobileDetailExpanded, setMobileDetailExpanded] = useState(false);
 
   // Build progress: which BOM lines are populated (persisted per board locally).
   const [populated, setPopulated] = useState<Set<number>>(new Set());
@@ -388,10 +390,14 @@ export default function BoardViewPage() {
 
   // Selecting a designator set: highlight + jump to the side that shows most of them.
   const selectDesignators = useCallback(
-    (designators: string[], label: string) => {
+    (designators: string[], label: string, preferredSide?: Side) => {
       const set = new Set(designators.map(norm));
       setSelected(set);
       setSelectionLabel(label);
+      if (preferredSide) {
+        setSide(preferredSide);
+        return;
+      }
       const onTop = bundle.placements.filter((p) => p.side === "top" && set.has(norm(p.designator))).length;
       const onBottom = bundle.placements.filter(
         (p) => p.side === "bottom" && set.has(norm(p.designator)),
@@ -403,11 +409,17 @@ export default function BoardViewPage() {
   );
 
   const selectBomRow = useCallback(
-    (row: BomRow) => {
+    (row: BomRow, focus?: Placement) => {
       setScanNotes([]);
       setDetailRow(row);
+      setMobileDetailExpanded(false);
+      setFocusedDesignator(focus?.designator ?? null);
       setMobilePane("board");
-      selectDesignators(splitDesignators(row.designators), row.partMpn || row.value || "part");
+      selectDesignators(
+        splitDesignators(row.designators),
+        row.partMpn || row.value || "part",
+        focus?.side,
+      );
     },
     [selectDesignators],
   );
@@ -417,14 +429,19 @@ export default function BoardViewPage() {
     setSelectionLabel("");
     setScanNotes([]);
     setDetailRow(null);
+    setMobileDetailExpanded(false);
+    setFocusedDesignator(null);
   }, []);
 
   // Click a placement dot -> select its whole BOM line (or just that part).
   const selectPlacement = useCallback(
     (p: Placement) => {
       const row = designatorToBom.get(norm(p.designator));
-      if (row) selectBomRow(row);
-      else selectDesignators([p.designator], p.designator);
+      if (row) selectBomRow(row, p);
+      else {
+        setFocusedDesignator(p.designator);
+        selectDesignators([p.designator], p.designator, p.side);
+      }
     },
     [designatorToBom, selectBomRow, selectDesignators],
   );
@@ -441,6 +458,8 @@ export default function BoardViewPage() {
       if (designators.length === 0) return false;
       setError("");
       setScanNotes([]);
+      setFocusedDesignator(null);
+      setMobileDetailExpanded(false);
       setDetailRow(rows.length === 1 ? rows[0] : null);
       selectDesignators(designators, mpn);
       return true;
@@ -482,6 +501,8 @@ export default function BoardViewPage() {
           splitDesignators(match.designators),
         );
         setError("");
+        setFocusedDesignator(null);
+        setMobileDetailExpanded(false);
         setDetailRow(rows.length === 1 ? rows[0] : null);
         const compatible = result.matches.some((match) => match.matchType === "electrical");
         setScanNotes([
@@ -772,7 +793,7 @@ export default function BoardViewPage() {
           </Link>
         </div>
         <p className="mb-4 text-sm text-black/60 dark:text-white/60">
-          Select a BOM part to find it on the board, or scan the component in your hand. Progress is saved on this device.
+          Select a BOM part to find it on the board, or scan the component in your hand. Progress is saved to your account.
         </p>
 
         <div className="mb-4 grid grid-cols-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1 lg:hidden" aria-label="Assembly workspace">
@@ -857,22 +878,41 @@ export default function BoardViewPage() {
               mapper={mapper}
               placements={placementsThisSide}
               selected={selected}
+              focusedDesignator={focusedDesignator}
               calibrating={calStep > 0}
               onPlacementClick={selectPlacement}
               onImageClick={calStep > 0 ? handleCalibrationClick : undefined}
             />
 
             {detailRow && (
-              <div className="mt-3 lg:hidden">
-                <ComponentCard
-                  row={detailRow}
-                  side={sideLabel(detailRow)}
-                  count={countDesignators(detailRow.designators)}
-                  populated={populated.has(detailRow.id)}
-                  onTogglePopulated={() => togglePopulated(detailRow.id)}
-                  onManageStock={detailRow.resolvedPartId ? () => setStockEditorRow(detailRow) : undefined}
-                  onClose={clearSelection}
-                />
+              <div
+                className={`assembly-detail-sheet fixed inset-x-3 z-50 rounded-xl bg-[var(--surface)] shadow-2xl sm:left-auto sm:right-4 sm:w-96 lg:hidden ${
+                  mobileDetailExpanded ? "max-h-[52dvh] overflow-y-auto" : ""
+                }`}
+                aria-live="polite"
+              >
+                {mobileDetailExpanded ? (
+                  <ComponentCard
+                    row={detailRow}
+                    side={sideLabel(detailRow)}
+                    count={countDesignators(detailRow.designators)}
+                    populated={populated.has(detailRow.id)}
+                    onTogglePopulated={() => togglePopulated(detailRow.id)}
+                    onManageStock={detailRow.resolvedPartId ? () => setStockEditorRow(detailRow) : undefined}
+                    onClose={() => setMobileDetailExpanded(false)}
+                  />
+                ) : (
+                  <MobileComponentPeek
+                    row={detailRow}
+                    side={sideLabel(detailRow)}
+                    count={countDesignators(detailRow.designators)}
+                    populated={populated.has(detailRow.id)}
+                    onTogglePopulated={() => togglePopulated(detailRow.id)}
+                    onExpand={() => setMobileDetailExpanded(true)}
+                    onManageStock={detailRow.resolvedPartId ? () => setStockEditorRow(detailRow) : undefined}
+                    onClose={clearSelection}
+                  />
+                )}
               </div>
             )}
 
@@ -1203,6 +1243,82 @@ function ProgressBar({
 // ===========================================================================
 // Selected component detail card
 // ===========================================================================
+function MobileComponentPeek({
+  row,
+  side,
+  count,
+  populated,
+  onTogglePopulated,
+  onExpand,
+  onManageStock,
+  onClose,
+}: {
+  row: BomRow;
+  side: string;
+  count: number;
+  populated: boolean;
+  onTogglePopulated: () => void;
+  onExpand: () => void;
+  onManageStock?: () => void;
+  onClose: () => void;
+}) {
+  const title = row.resolvedMpn || row.partMpn || row.value || "Component";
+  const descriptor = [row.manufacturer, row.value, row.package].filter(Boolean).join(" · ");
+  const actionClass =
+    "min-h-11 rounded-lg border border-[var(--border)] px-2 text-sm font-semibold hover:bg-[var(--surface-subtle)]";
+  return (
+    <div className="rounded-xl border border-blue-500/40 bg-[var(--surface)] p-3">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-mono text-sm font-semibold">{title}</p>
+          {descriptor && <p className="mt-0.5 truncate text-xs text-[var(--muted)]">{descriptor}</p>}
+        </div>
+        <button
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-xl text-[var(--muted)] hover:bg-[var(--surface-subtle)]"
+          onClick={onClose}
+          aria-label="Clear component selection"
+        >
+          ×
+        </button>
+      </div>
+      <dl
+        className="mt-2 grid gap-2 text-xs"
+        style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}
+      >
+        <div className="min-w-0">
+          <dt className="text-[10px] uppercase tracking-wide text-[var(--muted)]">Designators</dt>
+          <dd className="truncate font-medium">{row.designators || "—"}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-wide text-[var(--muted)]">Placements</dt>
+          <dd className="font-medium tabular-nums">{count || row.qtyPerBoard}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-wide text-[var(--muted)]">Side</dt>
+          <dd className="font-medium">{side}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-wide text-[var(--muted)]">On hand</dt>
+          <dd className="font-medium tabular-nums">{row.onHand}</dd>
+        </div>
+      </dl>
+      <div
+        className="mt-3 grid gap-2"
+        style={{ gridTemplateColumns: `repeat(${onManageStock ? 3 : 2}, minmax(0, 1fr))` }}
+      >
+        <button className={actionClass} onClick={onExpand}>Details</button>
+        {onManageStock && <button className={actionClass} onClick={onManageStock}>Stock</button>}
+        <button
+          className={`${actionClass} ${populated ? "border-emerald-600 bg-emerald-50 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-200" : ""}`}
+          onClick={onTogglePopulated}
+        >
+          {populated ? "Populated ✓" : "Mark done"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ComponentCard({
   row,
   side,
@@ -1405,6 +1521,7 @@ function BoardCanvas({
   mapper,
   placements,
   selected,
+  focusedDesignator,
   calibrating,
   onPlacementClick,
   onImageClick,
@@ -1417,6 +1534,7 @@ function BoardCanvas({
   mapper: ((x: number, y: number) => { fx: number; fy: number }) | null;
   placements: Placement[];
   selected: Set<string>;
+  focusedDesignator: string | null;
   calibrating: boolean;
   onPlacementClick: (p: Placement) => void;
   onImageClick?: (frac: { x: number; y: number }) => void;
@@ -1506,7 +1624,9 @@ function BoardCanvas({
 
   function onPointerDown(e: React.PointerEvent) {
     try {
-      e.currentTarget.setPointerCapture(e.pointerId);
+      // Preserve the original hit target. Capturing on the viewport retargets
+      // marker taps away from their button and prevents component selection.
+      (e.target as Element).setPointerCapture(e.pointerId);
     } catch {
       // Synthetic/testing pointer events may not register an active native
       // pointer. The gesture still works; capture is only for leaving the box.
@@ -1595,6 +1715,14 @@ function BoardCanvas({
     if (fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1) onImageClick({ x: fx, y: fy });
   }
 
+  function handlePlacementClick(placement: Placement) {
+    if (suppressClick.current) {
+      suppressClick.current = false;
+      return;
+    }
+    onPlacementClick(placement);
+  }
+
   const zoomBy = (k: number) =>
     setView((v) => {
       setAnimate(true);
@@ -1676,15 +1804,20 @@ function BoardCanvas({
                 mapper={mapper}
                 scale={view.scale}
                 calibrating={calibrating}
-                onPlacementClick={onPlacementClick}
+                onPlacementClick={handlePlacementClick}
               />
             )}
 
             {/* Red arrow(s) from the board centre to the selected part(s) */}
             {mapper &&
               (() => {
-                const sel = placements.filter((p) => selected.has(norm(p.designator)));
+                const selectedPlacements = placements.filter((p) => selected.has(norm(p.designator)));
+                const focused = focusedDesignator
+                  ? selectedPlacements.filter((p) => norm(p.designator) === norm(focusedDesignator))
+                  : [];
+                const sel = focused.length > 0 ? focused : selectedPlacements;
                 if (sel.length === 0) return null;
+                const arrowMarkerId = `arrowhead-${boardId}-${side}`;
                 return (
                   <svg
                     className="pointer-events-none absolute left-0 top-0"
@@ -1694,30 +1827,40 @@ function BoardCanvas({
                   >
                     <defs>
                       <marker
-                        id="arrowhead"
-                        markerUnits="userSpaceOnUse"
-                        markerWidth="22"
-                        markerHeight="22"
-                        refX="15"
-                        refY="8"
+                        id={arrowMarkerId}
+                        markerUnits="strokeWidth"
+                        markerWidth="4"
+                        markerHeight="4"
+                        refX="3.2"
+                        refY="2"
                         orient="auto"
+                        viewBox="0 0 4 4"
                       >
-                        <path d="M0,0 L16,8 L0,16 Z" fill="#ef4444" />
+                        <path d="M0,0 L4,2 L0,4 Z" fill="#ef4444" />
                       </marker>
                     </defs>
                     {sel.map((p) => {
                       const { fx, fy } = mapper(p.x, p.y);
                       if (!Number.isFinite(fx) || !Number.isFinite(fy)) return null;
+                      const x1 = W0 / 2;
+                      const y1 = contentH / 2;
+                      const targetX = fx * W0;
+                      const targetY = fy * contentH;
+                      const dx = targetX - x1;
+                      const dy = targetY - y1;
+                      const distance = Math.max(1, Math.hypot(dx, dy));
+                      const targetInset = Math.min(distance / 3, 22 / Math.max(view.scale, 0.01));
                       return (
                         <line
                           key={p.id}
-                          x1={W0 / 2}
-                          y1={contentH / 2}
-                          x2={fx * W0}
-                          y2={fy * contentH}
+                          x1={x1}
+                          y1={y1}
+                          x2={targetX - (dx / distance) * targetInset}
+                          y2={targetY - (dy / distance) * targetInset}
                           stroke="#ef4444"
-                          strokeWidth={5}
-                          markerEnd="url(#arrowhead)"
+                          strokeWidth={4 / Math.max(view.scale, 0.01)}
+                          strokeLinecap="round"
+                          markerEnd={`url(#${arrowMarkerId})`}
                         />
                       );
                     })}
@@ -1738,7 +1881,15 @@ function BoardCanvas({
                       className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2"
                       style={{ left: `${fx * 100}%`, top: `${fy * 100}%` }}
                     >
-                      <div className="h-[34px] w-[34px] rounded-[3px] border-2 border-red-500 bg-red-500/20 shadow-[0_0_0_2px_rgba(0,0,0,0.55)]" />
+                      <div
+                        className="rounded-[3px] border-red-500 bg-red-500/20"
+                        style={{
+                          width: 34 / Math.max(view.scale, 0.01),
+                          height: 34 / Math.max(view.scale, 0.01),
+                          borderWidth: 2 / Math.max(view.scale, 0.01),
+                          boxShadow: `0 0 0 ${2 / Math.max(view.scale, 0.01)}px rgba(0,0,0,0.55)`,
+                        }}
+                      />
                     </div>
                   );
                 })}
