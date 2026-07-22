@@ -93,6 +93,8 @@ export function Modal({
             className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-2xl text-slate-500 hover:bg-slate-100 hover:text-slate-950 dark:hover:bg-slate-800 dark:hover:text-white"
             onClick={onClose}
             aria-label="Close dialog"
+            aria-keyshortcuts="Escape"
+            title="Close (Esc)"
           >
             <span aria-hidden>×</span>
           </button>

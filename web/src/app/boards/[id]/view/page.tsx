@@ -7,9 +7,11 @@ import type { ReaderOptions } from "zxing-wasm/reader";
 
 import { Nav } from "@/components/Nav";
 import { StockEditorModal } from "@/components/StockEditor";
+import { Modal } from "@/components/ui";
 import { jget, jpost, jput, jupload } from "@/lib/client";
 import { decodeScannedBytes, parseLabel } from "@/lib/domain/barcode";
 import { normalizePartIdentifier as normalizePartIdentifierForDisplay } from "@/lib/domain/jellybeanMatch";
+import { isKeyboardInput } from "@/lib/keyboard";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the API shapes)
@@ -776,6 +778,88 @@ export default function BoardViewPage() {
   const hasBottom = bundle.images.some((im) => im.side === "bottom");
   const placedCount = placementsThisSide.length;
 
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (
+        event.defaultPrevented ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        isKeyboardInput(event.target) ||
+        document.querySelector('[role="dialog"][aria-modal="true"]')
+      ) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      if (key === "escape") {
+        if (calStep > 0) {
+          event.preventDefault();
+          setCalStep(0);
+          setCalTargets(null);
+          calRefsRef.current = {};
+          clearSelection();
+        } else if (mobileDetailExpanded) {
+          event.preventDefault();
+          setMobileDetailExpanded(false);
+        } else if (detailRow || selected.size > 0) {
+          event.preventDefault();
+          clearSelection();
+        } else if (mobilePane === "board") {
+          event.preventDefault();
+          setMobilePane("parts");
+        }
+        return;
+      }
+
+      if ((key === "j" || key === "k") && filteredBom.length > 0) {
+        event.preventDefault();
+        const current = detailRow ? filteredBom.findIndex((row) => row.id === detailRow.id) : -1;
+        const next = current < 0
+          ? (key === "j" ? 0 : filteredBom.length - 1)
+          : (current + (key === "j" ? 1 : -1) + filteredBom.length) % filteredBom.length;
+        const row = filteredBom[next];
+        selectBomRow(row);
+        window.requestAnimationFrame(() => {
+          const matches = [...document.querySelectorAll<HTMLElement>(`[data-bom-row-id="${row.id}"]`)];
+          matches.find((element) => element.offsetParent !== null)?.scrollIntoView({ block: "nearest" });
+        });
+        return;
+      }
+
+      if (event.code === "Space" && detailRow) {
+        event.preventDefault();
+        togglePopulated(detailRow.id);
+        return;
+      }
+
+      if (key === "t" || key === "b") {
+        event.preventDefault();
+        setSide(key === "t" ? "top" : "bottom");
+        setMobilePane("board");
+        return;
+      }
+
+      if (key === "s") {
+        event.preventDefault();
+        setScanOpen(true);
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [
+    calStep,
+    clearSelection,
+    detailRow,
+    filteredBom,
+    mobileDetailExpanded,
+    mobilePane,
+    selectBomRow,
+    selected.size,
+    togglePopulated,
+  ]);
+
   return (
     <>
       <Nav />
@@ -832,6 +916,8 @@ export default function BoardViewPage() {
                   <button
                     key={s}
                     onClick={() => setSide(s)}
+                    aria-keyshortcuts={s === "top" ? "T" : "B"}
+                    title={`${s === "top" ? "Top" : "Bottom"} side (${s === "top" ? "T" : "B"})`}
                     className={`min-h-11 px-3 py-2 text-sm capitalize ${
                       side === s ? "bg-blue-600 text-white" : "hover:bg-black/5 dark:hover:bg-white/10"
                     }`}
@@ -844,7 +930,7 @@ export default function BoardViewPage() {
               <span className="text-xs text-black/50 dark:text-white/50">
                 {placedCount} part(s) this side
               </span>
-              <button className={btn} onClick={() => setScanOpen(true)}>
+              <button className={btn} onClick={() => setScanOpen(true)} aria-keyshortcuts="S" title="Scan barcode (S)">
                 Scan barcode
               </button>
             </div>
@@ -1009,6 +1095,8 @@ export default function BoardViewPage() {
             {/* Filter */}
             <div className="mb-2 flex items-center gap-2">
               <input
+                data-shortcut-search
+                aria-keyshortcuts="/"
                 className="min-h-11 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-600/20"
                 placeholder="Filter by MPN, value, package, designator, DigiKey…"
                 value={query}
@@ -1054,7 +1142,7 @@ export default function BoardViewPage() {
                 const done = populated.has(row.id);
                 const isSelected = selected.size > 0 && splitDesignators(row.designators).some((designator) => selected.has(norm(designator)));
                 return (
-                  <li key={row.id} className={`rounded-xl border bg-[var(--surface)] shadow-sm ${isSelected ? "border-blue-500" : done ? "border-emerald-400" : "border-[var(--border)]"}`}>
+                  <li key={row.id} data-bom-row-id={row.id} className={`rounded-xl border bg-[var(--surface)] shadow-sm ${isSelected ? "border-blue-500" : done ? "border-emerald-400" : "border-[var(--border)]"}`}>
                     <div className="flex items-stretch">
                       <button className="min-w-0 flex-1 p-3 text-left" onClick={() => selectBomRow(row)}>
                         <div className="flex items-start justify-between gap-3">
@@ -1112,6 +1200,7 @@ export default function BoardViewPage() {
                     return (
                       <tr
                         key={row.id}
+                        data-bom-row-id={row.id}
                         onClick={() => selectBomRow(row)}
                         className={`cursor-pointer border-b border-black/5 dark:border-white/10 ${
                           isSel
@@ -1723,7 +1812,7 @@ function BoardCanvas({
     onPlacementClick(placement);
   }
 
-  const zoomBy = (k: number) =>
+  const zoomBy = useCallback((k: number) =>
     setView((v) => {
       setAnimate(true);
       const r = viewportRef.current?.getBoundingClientRect();
@@ -1732,18 +1821,47 @@ function BoardCanvas({
       const scale = Math.min(20, Math.max(0.15, v.scale * k));
       const f = scale / v.scale;
       return { scale, tx: cx - (cx - v.tx) * f, ty: cy - (cy - v.ty) * f };
-    });
+    }), []);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (
+        event.defaultPrevented ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        isKeyboardInput(event.target) ||
+        document.querySelector('[role="dialog"][aria-modal="true"]')
+      ) {
+        return;
+      }
+
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        zoomBy(1.25);
+      } else if (event.key === "-" || event.key === "_") {
+        event.preventDefault();
+        zoomBy(1 / 1.25);
+      } else if (event.key === "0") {
+        event.preventDefault();
+        fitView();
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [fitView, zoomBy]);
 
   return (
     <div className="relative">
       <div className="absolute right-2 top-2 z-10 flex gap-1">
-        <button className="grid h-11 w-11 place-items-center rounded-lg bg-slate-950/70 text-xl text-white" aria-label="Zoom in" onClick={() => zoomBy(1.25)}>
+        <button className="grid h-11 w-11 place-items-center rounded-lg bg-slate-950/70 text-xl text-white" aria-label="Zoom in" aria-keyshortcuts="=" title="Zoom in (+)" onClick={() => zoomBy(1.25)}>
           +
         </button>
-        <button className="grid h-11 w-11 place-items-center rounded-lg bg-slate-950/70 text-xl text-white" aria-label="Zoom out" onClick={() => zoomBy(1 / 1.25)}>
+        <button className="grid h-11 w-11 place-items-center rounded-lg bg-slate-950/70 text-xl text-white" aria-label="Zoom out" aria-keyshortcuts="-" title="Zoom out (−)" onClick={() => zoomBy(1 / 1.25)}>
           −
         </button>
-        <button className="min-h-11 rounded-lg bg-slate-950/70 px-3 text-sm font-medium text-white" onClick={fitView}>
+        <button className="min-h-11 rounded-lg bg-slate-950/70 px-3 text-sm font-medium text-white" onClick={fitView} aria-keyshortcuts="0" title="Fit board image (0)">
           Fit
         </button>
       </div>
@@ -2194,17 +2312,7 @@ function BarcodeScanModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" onClick={onClose}>
-      <div
-        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-t-2xl border border-black/10 bg-[var(--background)] p-5 sm:rounded-2xl dark:border-white/15"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="font-medium">Scan a component</h2>
-          <button className="text-black/50 hover:text-black dark:text-white/50 dark:hover:text-white" onClick={onClose}>
-            ✕
-          </button>
-        </div>
+    <Modal title="Scan a component" onClose={onClose}>
         <div className="relative overflow-hidden rounded-xl border border-black/10 bg-black dark:border-white/15">
           <video ref={videoRef} className="aspect-square w-full object-cover" muted playsInline />
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
@@ -2250,8 +2358,7 @@ function BarcodeScanModal({
             Identify
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

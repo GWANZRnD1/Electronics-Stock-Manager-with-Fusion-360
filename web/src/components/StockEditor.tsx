@@ -78,6 +78,19 @@ function StockLocation({
             aria-invalid={!valid}
             onFocus={(event) => event.currentTarget.select()}
             onChange={(event) => setDraft(event.target.value.replace(/\D/g, ""))}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && changed) {
+                event.preventDefault();
+                void onSave(quantity);
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                setDraft(String(row.quantity));
+                event.currentTarget.blur();
+              }
+            }}
+            aria-keyshortcuts="Enter Escape"
+            title="Enter to save · Esc to restore"
           />
         </label>
       </div>
@@ -106,6 +119,14 @@ function StockLocation({
             value={moveTo}
             disabled={busy}
             onChange={(event) => setMoveTo(event.target.value ? Number(event.target.value) : "")}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                setMoving(false);
+                setMoveTo("");
+              }
+            }}
           >
             <option value="">Choose destination…</option>
             {targets.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
@@ -237,7 +258,19 @@ export function StockEditor({
       )}
 
       {adding ? (
-        <form className="mt-3 rounded-xl border border-[var(--border)] p-3" onSubmit={(event) => void addLocation(event)}>
+        <form
+          className="mt-3 rounded-xl border border-[var(--border)] p-3"
+          onSubmit={(event) => void addLocation(event)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+              setAdding(false);
+              setAddLocationId("");
+              setAddQuantity("0");
+            }
+          }}
+        >
           <label className="text-sm font-medium" htmlFor={`add-location-${partId}`}>Location</label>
           <select id={`add-location-${partId}`} className={`${inputClass} mt-1`} value={addLocationId} disabled={busy} onChange={(event) => setAddLocationId(event.target.value ? Number(event.target.value) : "")}>
             <option value="">Choose location…</option>

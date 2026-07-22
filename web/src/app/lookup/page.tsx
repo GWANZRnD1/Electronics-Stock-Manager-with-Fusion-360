@@ -60,6 +60,8 @@ export default function LookupPage() {
 
         <form onSubmit={search} className="mb-6 flex gap-2">
           <input
+            data-shortcut-search
+            aria-keyshortcuts="/"
             className="flex-1 rounded-md border border-black/15 bg-transparent px-3 py-2 font-mono outline-none focus:border-blue-500 dark:border-white/20"
             placeholder="MPN (e.g. MCP2221A-I/SL)"
             value={mpn}

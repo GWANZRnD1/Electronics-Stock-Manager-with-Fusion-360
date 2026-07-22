@@ -1,10 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { jget } from "@/lib/client";
+import { isKeyboardInput } from "@/lib/keyboard";
+
+import { Modal } from "./ui";
 
 const LINKS = [
   { href: "/", label: "Inventory", icon: "inventory" },
@@ -68,7 +71,9 @@ function NavIcon({ name }: { name: (typeof LINKS)[number]["icon"] }) {
 
 export function Nav() {
   const pathname = usePathname();
+  const router = useRouter();
   const [user, setUser] = useState<{ name: string; isRoot: boolean } | null>(null);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -79,6 +84,54 @@ export function Nav() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented) return;
+
+      if (event.key === "Escape" && shortcutsOpen) {
+        event.preventDefault();
+        setShortcutsOpen(false);
+        return;
+      }
+
+      const inInput = isKeyboardInput(event.target);
+      const dialogOpen = Boolean(document.querySelector('[role="dialog"][aria-modal="true"]'));
+
+      if (event.key === "?" && !inInput && !dialogOpen && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        setShortcutsOpen(true);
+        return;
+      }
+
+      if (event.key === "/" && !inInput && !dialogOpen && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const search = document.querySelector<HTMLElement>("[data-shortcut-search]:not([disabled])");
+        if (search) {
+          event.preventDefault();
+          search.focus();
+          if (search instanceof HTMLInputElement) search.select();
+        }
+        return;
+      }
+
+      if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && !inInput && !dialogOpen) {
+        const index = Number(event.key) - 1;
+        const destination = LINKS[index];
+        if (destination) {
+          event.preventDefault();
+          router.push(destination.href);
+        }
+        return;
+      }
+
+      if (event.key === "Escape" && inInput) {
+        (event.target as HTMLElement).blur();
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [router, shortcutsOpen]);
 
   return (
     <>
@@ -91,13 +144,15 @@ export function Nav() {
             <span>Stock Manager</span>
           </Link>
           <nav aria-label="Primary" className="ml-auto hidden items-center gap-1 sm:flex">
-            {LINKS.map((link) => {
+            {LINKS.map((link, index) => {
               const active = isActive(pathname, link.href);
               return (
                 <Link
                   key={link.href}
                   href={link.href}
                   aria-current={active ? "page" : undefined}
+                  aria-keyshortcuts={`Alt+${index + 1}`}
+                  title={`${link.label} (Alt+${index + 1})`}
                   className={`flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors ${
                     active
                       ? "bg-blue-700 text-white dark:bg-blue-400 dark:text-slate-950"
@@ -110,6 +165,16 @@ export function Nav() {
               );
             })}
           </nav>
+          <button
+            type="button"
+            className="ml-auto grid h-11 w-11 shrink-0 place-items-center rounded-lg border border-[var(--border)] text-sm font-semibold text-[var(--muted)] hover:bg-[var(--surface-subtle)] sm:ml-2"
+            onClick={() => setShortcutsOpen(true)}
+            aria-label="Keyboard shortcuts"
+            aria-keyshortcuts="?"
+            title="Keyboard shortcuts (?)"
+          >
+            ?
+          </button>
           {user && (
             <Link
               href="/settings"
@@ -130,13 +195,14 @@ export function Nav() {
         className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border)] bg-[var(--surface)]/97 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_24px_rgba(15,23,42,0.08)] backdrop-blur sm:hidden"
       >
         <div className="grid grid-cols-5">
-          {LINKS.map((link) => {
+          {LINKS.map((link, index) => {
             const active = isActive(pathname, link.href);
             return (
               <Link
                 key={link.href}
                 href={link.href}
                 aria-current={active ? "page" : undefined}
+                aria-keyshortcuts={`Alt+${index + 1}`}
                 className={`flex min-h-16 flex-col items-center justify-center gap-1 px-1 text-[11px] font-medium ${
                   active ? "text-blue-700 dark:text-blue-300" : "text-slate-500 dark:text-slate-400"
                 }`}
@@ -154,6 +220,87 @@ export function Nav() {
           })}
         </div>
       </nav>
+
+      {shortcutsOpen && (
+        <ShortcutHelp pathname={pathname} onClose={() => setShortcutsOpen(false)} />
+      )}
     </>
+  );
+}
+
+function Keycap({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="inline-flex min-h-7 min-w-7 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface-subtle)] px-2 font-mono text-xs font-semibold shadow-sm">
+      {children}
+    </kbd>
+  );
+}
+
+function ShortcutRow({ keys, label }: { keys: string[]; label: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b border-[var(--border)] py-2.5 last:border-0">
+      <span className="text-sm text-[var(--muted)]">{label}</span>
+      <span className="flex shrink-0 items-center gap-1">
+        {keys.map((key) => <Keycap key={key}>{key}</Keycap>)}
+      </span>
+    </div>
+  );
+}
+
+function ShortcutHelp({ pathname, onClose }: { pathname: string; onClose: () => void }) {
+  const assembly = /^\/boards\/[^/]+\/view/.test(pathname);
+  const stocktake = pathname.startsWith("/stocktake");
+  const inventory = pathname === "/";
+
+  return (
+    <Modal title="Keyboard shortcuts" onClose={onClose}>
+      <div className="space-y-4">
+        <section>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Anywhere</h3>
+          <div className="mt-1">
+            <ShortcutRow keys={["/"]} label="Focus this page's search or filter" />
+            <ShortcutRow keys={["Alt", "1–5"]} label="Switch primary section" />
+            <ShortcutRow keys={["Esc"]} label="Close, cancel, or clear the current action" />
+            <ShortcutRow keys={["?"]} label="Show this shortcut guide" />
+          </div>
+        </section>
+
+        {assembly && (
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Assembly view</h3>
+            <div className="mt-1">
+              <ShortcutRow keys={["J", "K"]} label="Select next or previous BOM line" />
+              <ShortcutRow keys={["Space"]} label="Toggle selected line populated" />
+              <ShortcutRow keys={["T", "B"]} label="Show top or bottom of board" />
+              <ShortcutRow keys={["S"]} label="Scan a component" />
+              <ShortcutRow keys={["+", "−"]} label="Zoom the board image" />
+              <ShortcutRow keys={["0"]} label="Fit the board image" />
+            </div>
+          </section>
+        )}
+
+        {stocktake && (
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Stocktake</h3>
+            <div className="mt-1">
+              <ShortcutRow keys={["Enter"]} label="Confirm count and move to the next row" />
+              <ShortcutRow keys={["Esc"]} label="Restore the active row's expected count" />
+              <ShortcutRow keys={["Ctrl/⌘", "Enter"]} label="Save all checked counts" />
+            </div>
+          </section>
+        )}
+
+        {inventory && (
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Inventory table</h3>
+            <div className="mt-1">
+              <ShortcutRow keys={["Double-click"]} label="Edit a catalog cell or location count" />
+              <ShortcutRow keys={["Enter"]} label="Save an inline edit" />
+              <ShortcutRow keys={["Esc"]} label="Cancel an inline edit" />
+            </div>
+          </section>
+        )}
+      </div>
+    </Modal>
   );
 }

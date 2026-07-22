@@ -125,6 +125,30 @@ export default function StocktakePage() {
     setMessage("");
   }
 
+  function restoreCount(row: StockRow) {
+    setCounts((previous) => new Map(previous).set(row.partId, row.quantity));
+    setTouched((previous) => {
+      const next = new Set(previous);
+      next.delete(row.partId);
+      return next;
+    });
+    setMessage("");
+  }
+
+  function focusNextCount(partId: number) {
+    window.requestAnimationFrame(() => {
+      const inputs = [...document.querySelectorAll<HTMLInputElement>("[data-stocktake-count]")];
+      const current = inputs.findIndex((input) => Number(input.dataset.stocktakeCount) === partId);
+      const next = inputs[current + 1];
+      if (next) {
+        next.focus();
+        next.select();
+      } else {
+        inputs[current]?.blur();
+      }
+    });
+  }
+
   function chooseLocation(value: string) {
     const next = value ? Number(value) : "";
     setLoading(Boolean(next));
@@ -174,7 +198,20 @@ export default function StocktakePage() {
   return (
     <>
       <Nav />
-      <main className="mx-auto w-full max-w-4xl flex-1 p-4 sm:p-6">
+      <main
+        className="mx-auto w-full max-w-4xl flex-1 p-4 sm:p-6"
+        onKeyDown={(event) => {
+          if (
+            event.key === "Enter" &&
+            (event.ctrlKey || event.metaKey) &&
+            touched.size > 0 &&
+            !saving
+          ) {
+            event.preventDefault();
+            void applyCounts();
+          }
+        }}
+      >
         <header className="mb-5">
           <p className="text-sm font-semibold uppercase tracking-[0.14em] text-blue-700 dark:text-blue-300">
             Physical inventory
@@ -225,11 +262,14 @@ export default function StocktakePage() {
                 <h2 className="mt-2 text-lg font-semibold">{selectedLocation?.name}</h2>
                 <p className="text-sm text-[var(--muted)]">{touched.size} of {scopedRows.length} checked · {differences} difference{differences === 1 ? "" : "s"}</p>
               </div>
-              <button className={btnSecondary} onClick={confirmShown} disabled={filtered.length === 0}>Confirm shown unchanged</button>
+              <div className="text-right">
+                <button className={btnSecondary} onClick={confirmShown} disabled={filtered.length === 0}>Confirm shown unchanged</button>
+                <p className="mt-1 hidden text-xs text-[var(--muted)] sm:block">Enter: confirm &amp; next · Esc: restore</p>
+              </div>
             </div>
 
             <label htmlFor="stocktake-search" className="sr-only">Find a component</label>
-            <input id="stocktake-search" className={`${inputClass} mb-3`} placeholder="Scan or search MPN / manufacturer…" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <input id="stocktake-search" data-shortcut-search aria-keyshortcuts="/" className={`${inputClass} mb-3`} placeholder="Scan or search MPN / manufacturer…" value={query} onChange={(event) => setQuery(event.target.value)} />
 
             {loading ? (
               <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-6 text-sm text-[var(--muted)]">Loading stock…</div>
@@ -256,7 +296,28 @@ export default function StocktakePage() {
                           <button className="grid h-11 w-11 place-items-center rounded-lg border border-[var(--border)] text-xl" aria-label={`Decrease ${row.mpn}`} onClick={() => setCount(row, counted - 1)}>−</button>
                           <label className="text-center text-xs font-medium text-[var(--muted)]">
                             Counted
-                            <input className="mt-1 block h-11 w-24 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2 text-center text-lg font-semibold tabular-nums" inputMode="numeric" value={counted} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setCount(row, Number(event.target.value.replace(/\D/g, "")) || 0)} />
+                            <input
+                              className="mt-1 block h-11 w-24 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2 text-center text-lg font-semibold tabular-nums"
+                              inputMode="numeric"
+                              value={counted}
+                              data-stocktake-count={row.partId}
+                              aria-keyshortcuts="Enter Escape"
+                              title="Enter to confirm and move next · Esc to restore expected count"
+                              onFocus={(event) => event.currentTarget.select()}
+                              onChange={(event) => setCount(row, Number(event.target.value.replace(/\D/g, "")) || 0)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
+                                  event.preventDefault();
+                                  setCount(row, counted);
+                                  focusNextCount(row.partId);
+                                } else if (event.key === "Escape") {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  restoreCount(row);
+                                  event.currentTarget.blur();
+                                }
+                              }}
+                            />
                           </label>
                           <button className="grid h-11 w-11 place-items-center rounded-lg border border-[var(--border)] text-xl" aria-label={`Increase ${row.mpn}`} onClick={() => setCount(row, counted + 1)}>+</button>
                           {!checked && <button className="min-h-11 rounded-lg border border-[var(--border)] px-3 text-sm font-medium" onClick={() => setCount(row, row.quantity)}>Same</button>}
@@ -272,7 +333,7 @@ export default function StocktakePage() {
             {scopedRows.length > 0 && (
               <div className="sticky bottom-[5.25rem] z-20 mt-4 flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-lg sm:bottom-4">
                 <div className="text-sm"><strong>{touched.size}</strong> counted<span className="hidden text-[var(--muted)] sm:inline"> · {differences} changes</span></div>
-                <button className={btn} onClick={() => void applyCounts()} disabled={saving || touched.size === 0}>{saving ? "Saving…" : `Save ${touched.size} count${touched.size === 1 ? "" : "s"}`}</button>
+                <button className={btn} aria-keyshortcuts="Control+Enter Meta+Enter" title="Save counts (Ctrl/⌘+Enter)" onClick={() => void applyCounts()} disabled={saving || touched.size === 0}>{saving ? "Saving…" : `Save ${touched.size} count${touched.size === 1 ? "" : "s"}`}</button>
               </div>
             )}
           </section>

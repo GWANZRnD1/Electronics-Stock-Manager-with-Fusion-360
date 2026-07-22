@@ -195,6 +195,8 @@ export default function Home() {
           <>
             <div className="mb-3">
               <input
+                data-shortcut-search
+                aria-keyshortcuts="/"
                 className={inputClass}
                 placeholder="Search MPN, SPN, name, manufacturer, category, size…"
                 value={filters.q}
@@ -551,9 +553,9 @@ type EditableField =
   | "unitCost";
 
 /**
- * A catalog cell that turns into an inline editor on Ctrl/Cmd+click (desktop
- * only — touch has no modifier-click). Enter commits a single-field PATCH; Esc
- * or blur cancels. On success the parent updates its row locally (no refetch).
+ * A catalog cell that turns into an inline editor on double-click or
+ * Ctrl/Cmd+click. Enter commits a single-field PATCH; Esc or blur cancels. On
+ * success the parent updates its row locally (no refetch).
  */
 function EditableCell({
   partId,
@@ -588,8 +590,8 @@ function EditableCell({
     }
   }, [editing]);
 
-  function begin(e: React.MouseEvent) {
-    if (!(e.ctrlKey || e.metaKey)) return; // modifier-click only; ignores plain clicks and touch
+  function begin(e: React.MouseEvent, direct = false) {
+    if (!direct && !(e.ctrlKey || e.metaKey)) return;
     e.preventDefault();
     setDraft(raw);
     setErr(false);
@@ -660,7 +662,8 @@ function EditableCell({
     <td
       className={`${className ?? ""} cursor-cell hover:bg-blue-500/5`}
       onClick={begin}
-      title={title ?? "Ctrl+click to edit"}
+      onDoubleClick={(event) => begin(event, true)}
+      title={title ?? "Double-click to edit"}
     >
       {display ?? (raw || "—")}
     </td>
@@ -892,7 +895,11 @@ function LocationDetail({
               return (
                 <tr key={s.locationId} className="border-t border-black/5 dark:border-white/10">
                   <td className="py-1.5 pr-4">{s.location}</td>
-                  <td className="py-1.5 pr-4 text-right tabular-nums">
+                  <td
+                    className={`py-1.5 pr-4 text-right tabular-nums ${editLoc === s.locationId ? "" : "cursor-cell hover:bg-blue-500/5"}`}
+                    onDoubleClick={() => editLoc !== s.locationId && beginQty(s)}
+                    title={editLoc === s.locationId ? undefined : "Double-click to edit quantity"}
+                  >
                     {editLoc === s.locationId ? (
                       <span className="inline-flex items-center justify-end gap-1">
                         <input
